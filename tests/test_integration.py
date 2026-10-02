@@ -12,6 +12,7 @@ from homeassistant.components.homeassistant.exposed_entities import async_expose
 from homeassistant.config_entries import ConfigSubentryData
 from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import Context, HomeAssistant
+from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
@@ -21,15 +22,25 @@ from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_mock_service,
 )
-from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker
+from pytest_homeassistant_custom_component.test_util.aiohttp import (
+    AiohttpClientMocker,
+    AiohttpClientMockResponse,
+)
 
 from custom_components.typesafe_conversation.const import (
     CONF_ALWAYS_CONFIRM_RISKY,
     CONF_API_KEY,
+    CONF_API_TIMEOUT,
+    CONF_BASE_URL,
+    CONF_MODEL,
+    CONF_SERVER_PROFILE,
     DOMAIN,
     TYPESAFE_API_URL,
     TYPESAFE_MODELS_URL,
 )
+from custom_components.typesafe_conversation.system_one import ServerProfile
+
+LOCAL = "http://ollama.invalid:11434"
 
 
 @pytest.fixture(autouse=True)
@@ -213,11 +224,6 @@ async def test_diagnostics_record_the_decision_and_redact_secrets(
     )
 
     await _setup_home(hass)
-    # The warm-up ping fires during setup, so register it first.
-    aioclient_mock.post(
-        "http://private-host.example:11434/api/chat",
-        json={"message": {"content": "ok"}},
-    )
     aioclient_mock.post(TYPESAFE_API_URL, json=_recorded("get_the_coffee_boiling"))
     entry = await _add_entry(
         hass,
@@ -490,3 +496,436 @@ async def test_a_command_that_reached_no_entity_is_reported_as_failed(
     assert result.response.error_code is intent.IntentResponseErrorCode.FAILED_TO_HANDLE
     spoken = result.response.speech.get("plain", {}).get("speech", "")
     assert "Coffee Maker" in spoken
+
+
+# --- any System One server: discovery, reconfigure, the second stage ----------
+
+
+def _local_server(
+    aioclient_mock: AiohttpClientMocker, *, cap: int = 26, context: int | None = None
+) -> None:
+    """An Ollama-like server: two models, one of them a decision model."""
+    aioclient_mock.get(
+        LOCAL + "/v1/models",
+        json={"data": [{"id": "nimble:latest"}, {"id": "qwen3:4b"}]},
+    )
+
+    async def show(method, url, body):
+        decision = body["model"].startswith("nimble")
+        return AiohttpClientMockResponse(
+            method,
+            url,
+            json={
+                "capabilities": ["decision"] if decision else ["completion"],
+                "parameters": "num_ctx                        8194",
+            },
+        )
+
+    async def systemone(method, url, body):
+        if body["model"].startswith("qwen3"):
+            return AiohttpClientMockResponse(
+                method,
+                url,
+                status=400,
+                json={"error": 'model "qwen3:4b" is not supported by System One'},
+            )
+        if "probe" not in body["questions"]:
+            # The timed, real-sized request: this home and the full question set.
+            if context is not None:
+                return AiohttpClientMockResponse(
+                    method,
+                    url,
+                    status=400,
+                    json={"error": f"prompt 0 has 5373 tokens; expected 1-{context}"},
+                )
+            return AiohttpClientMockResponse(
+                method, url, json={"model": "nimble", "answers": {}, "usage": {}}
+            )
+        if len(body["questions"]["probe"]["criteria"]) > cap:
+            return AiohttpClientMockResponse(
+                method, url, status=400, json={"error": "too many candidates"}
+            )
+        return AiohttpClientMockResponse(
+            method, url, json={"model": "nimble", "answers": {}, "usage": {}}
+        )
+
+    aioclient_mock.post(LOCAL + "/api/show", side_effect=show)
+    aioclient_mock.post(LOCAL + "/v1/systemone", side_effect=systemone)
+
+
+async def _through_probe(hass: HomeAssistant, result: dict) -> dict:
+    """Let the probe task finish and step past the progress spinner."""
+    assert result["type"] is FlowResultType.SHOW_PROGRESS
+    await hass.async_block_till_done()
+    return await hass.config_entries.flow.async_configure(result["flow_id"])
+
+
+async def test_setup_discovers_what_the_server_can_take(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """No server table: the cap, context and timing are measured and cached."""
+    await _setup_home(hass)
+    _local_server(aioclient_mock)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user"}
+    )
+    assert result["step_id"] == "user"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_BASE_URL: LOCAL}
+    )
+    assert result["step_id"] == "model"
+    options = result["data_schema"].schema[CONF_MODEL].config["options"]
+    assert options == ["nimble"], "chat models are filtered out, `:latest` dropped"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_MODEL: "nimble"}
+    )
+    result = await _through_probe(hass, result)
+    # The user is told how fast the server is before relying on it.
+    assert result["step_id"] == "tested"
+    assert result["description_placeholders"]["model"] == "nimble"
+    assert float(result["description_placeholders"]["typical"]) >= 0
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["step_id"] == "llm"
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+
+    data = result["data"]
+    assert CONF_API_KEY not in data, "a local server needs no key"
+    assert data[CONF_BASE_URL] == LOCAL
+    profile = ServerProfile.from_dict(data[CONF_SERVER_PROFILE])
+    assert profile.max_options == 26
+    assert profile.num_ctx == 8194
+    assert profile.typical_s is not None, "a real-sized request was timed"
+    assert profile.matches(LOCAL, "nimble")
+    timed = [
+        b
+        for _m, u, b, _h in aioclient_mock.mock_calls
+        if str(u).endswith("/v1/systemone") and "probe" not in b["questions"]
+    ]
+    assert len(timed) == 1
+    assert "home" in timed[0]["state"], "the home's catalogue, not a probe"
+
+
+async def test_a_model_the_server_cannot_use_says_why(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    await _setup_home(hass)
+    _local_server(aioclient_mock)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_BASE_URL: LOCAL}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_MODEL: "qwen3:4b"}
+    )
+    result = await _through_probe(hass, result)
+
+    assert result["step_id"] == "model"
+    assert result["errors"] == {"base": "model_rejected"}
+    assert "not supported by System One" in result["description_placeholders"]["reason"]
+
+
+async def test_reconfigure_keeps_the_profile_when_only_the_key_changes(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """Same server and model: no point loading the model again to re-measure."""
+    await _setup_home(hass)
+    _local_server(aioclient_mock)
+    profile = ServerProfile(
+        max_options=26, timeout=34.0, base_url=LOCAL, model="nimble"
+    )
+    entry = await _add_entry(
+        hass,
+        aioclient_mock,
+        base_url=LOCAL,
+        model="nimble",
+        server_profile=profile.as_dict(),
+    )
+    aioclient_mock.mock_calls.clear()
+
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_BASE_URL: LOCAL, CONF_API_KEY: "a-new-key", CONF_API_TIMEOUT: 34.0},
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_MODEL: "nimble"}
+    )
+    assert result["step_id"] == "llm", "no probe: straight to the LLM settings"
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data[CONF_API_KEY] == "a-new-key"
+    assert CONF_API_TIMEOUT not in entry.data, "left at the measured value"
+    assert ServerProfile.from_dict(entry.data[CONF_SERVER_PROFILE]) == profile
+    probes = [u for _m, u, _b, _h in aioclient_mock.mock_calls if "systemone" in str(u)]
+    assert probes == [], "no model was loaded to re-measure"
+
+
+async def test_reconfigure_to_a_new_model_drops_a_timeout_left_as_prefilled(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """A timeout pinned for the old model must not override the new measurement."""
+    await _setup_home(hass)
+    _local_server(aioclient_mock)
+    profile = ServerProfile(max_options=26, base_url=LOCAL, model="tev1")
+    entry = await _add_entry(
+        hass,
+        aioclient_mock,
+        base_url=LOCAL,
+        model="tev1",
+        server_profile=profile.as_dict(),
+        api_timeout=20.0,
+    )
+
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_BASE_URL: LOCAL, CONF_API_TIMEOUT: 20.0}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_MODEL: "nimble"}
+    )
+    result = await _through_probe(hass, result)
+    assert result["step_id"] == "tested"
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    await hass.async_block_till_done()
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data[CONF_MODEL] == "nimble"
+    assert CONF_API_TIMEOUT not in entry.data, "the new measurement applies"
+
+
+async def test_diagnostics_redact_the_server_url_everywhere(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """A self-hosted URL is usually a private hostname."""
+    from custom_components.typesafe_conversation.diagnostics import (
+        async_get_config_entry_diagnostics,
+    )
+
+    await _setup_home(hass)
+    _local_server(aioclient_mock)
+    profile = ServerProfile(max_options=26, base_url=LOCAL, model="nimble")
+    entry = await _add_entry(
+        hass,
+        aioclient_mock,
+        base_url=LOCAL,
+        model="nimble",
+        server_profile=profile.as_dict(),
+    )
+    # The server's own error message can name its host.
+    entry.runtime_data.traces.append(
+        {"route": "error", "reason": "dial tcp ollama.invalid:11434: refused"}
+    )
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert "ollama.invalid" not in json.dumps(diag)
+    assert diag["recent_requests"][-1]["reason"].startswith("dial tcp **REDACTED**")
+    assert diag["client"]["server_profile"]["max_options"] == 26
+
+
+async def test_a_home_over_the_cap_is_answered_in_two_requests(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """Seven switches against a six-option cap: too many for one entity question.
+
+    The first request leaves target_entity out; the second asks it over just
+    the devices on the likeliest domain/area paths, and the merged answer
+    drives the command as a single request would.
+    """
+    await _setup_home(hass)
+    registry = er.async_get(hass)
+    garage = ar.async_get(hass).async_create("Garage")
+    for i in range(6):
+        switch = registry.async_get_or_create(
+            "switch", "demo", f"g{i}", suggested_object_id=f"garage_{i}"
+        )
+        registry.async_update_entity(
+            switch.entity_id, area_id=garage.id, name=f"Garage {i}"
+        )
+        hass.states.async_set(switch.entity_id, "off")
+        async_expose_entity(hass, conversation.DOMAIN, switch.entity_id, True)
+
+    recorded = _recorded("get_the_coffee_boiling")
+    first = {
+        **recorded,
+        "answers": {
+            k: v for k, v in recorded["answers"].items() if k != "target_entity"
+        },
+    }
+    second = {
+        "model": recorded["model"],
+        "answers": {
+            "target_entity": {
+                "type": "choice",
+                "choice": "switch.coffee_maker",
+                "probabilities": {
+                    "switch.coffee_maker": 0.97,
+                    "no_single_entity": 0.03,
+                },
+                "confidence": 0.94,
+            }
+        },
+        "usage": {"input_tokens": 120, "output_tokens": 1},
+    }
+
+    async def systemone(method, url, body):
+        stage_two = list(body["questions"]) == ["target_entity"]
+        return AiohttpClientMockResponse(
+            method, url, json=second if stage_two else first
+        )
+
+    aioclient_mock.post(TYPESAFE_API_URL, side_effect=systemone)
+    await _add_entry(
+        hass,
+        aioclient_mock,
+        server_profile=ServerProfile(max_options=6).as_dict(),
+    )
+    calls = async_mock_service(hass, "switch", "turn_on")
+
+    await conversation.async_converse(
+        hass,
+        "get the coffee boiling",
+        None,
+        None,
+        agent_id="conversation.typesafe_conversation",
+    )
+
+    requests = [
+        b for _m, u, b, _h in aioclient_mock.mock_calls if str(u) == TYPESAFE_API_URL
+    ]
+    assert len(requests) == 2
+    assert "target_entity" not in requests[0]["questions"]
+    assert list(requests[1]["questions"]) == ["target_entity"]
+    second_home = {e["id"] for e in requests[1]["state"]["home"]["entities"]}
+    assert "switch.coffee_maker" in second_home
+    assert len(second_home) < 7, "only the candidates, not the whole home"
+    assert len(calls) == 1
+    assert calls[0].data[ATTR_ENTITY_ID] == ["switch.coffee_maker"]
+
+
+async def test_a_model_whose_context_is_too_small_fails_at_setup(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """Better found here, with the server's reason, than on every voice command."""
+    await _setup_home(hass)
+    _local_server(aioclient_mock, context=2050)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_BASE_URL: LOCAL}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_MODEL: "nimble"}
+    )
+    result = await _through_probe(hass, result)
+
+    assert result["step_id"] == "model"
+    assert result["errors"] == {"base": "model_rejected"}
+    assert "expected 1-2050" in result["description_placeholders"]["reason"]
+
+
+async def test_setup_never_loads_the_language_model(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """No warm-up at startup and no periodic ping: whether the LLM sits in memory
+    is the server owner's decision. It is loaded when a request first needs it."""
+    await _setup_home(hass)
+    await _add_entry(
+        hass,
+        aioclient_mock,
+        llm_backend="ollama",
+        llm_base_url="http://llm.invalid:11434",
+        llm_model="a-model",
+    )
+    await hass.async_block_till_done()
+    chat = [u for _m, u, _b, _h in aioclient_mock.mock_calls if "/api/chat" in str(u)]
+    assert chat == []
+
+
+def _chat_calls(aioclient_mock: AiohttpClientMocker) -> list:
+    return [b for _m, u, b, _h in aioclient_mock.mock_calls if "/api/chat" in str(u)]
+
+
+async def test_opting_in_keeps_the_language_model_loaded(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """With the option on, the model is loaded at startup and asked to stay."""
+    await _setup_home(hass)
+    aioclient_mock.post(
+        "http://llm.invalid:11434/api/chat", json={"message": {"content": "ok"}}
+    )
+    await _add_entry(
+        hass,
+        aioclient_mock,
+        llm_backend="ollama",
+        llm_base_url="http://llm.invalid:11434",
+        llm_model="a-model",
+        llm_keep_loaded=True,
+    )
+    await hass.async_block_till_done()
+
+    (warm_up,) = _chat_calls(aioclient_mock)
+    assert warm_up["keep_alive"] == "30m"
+
+
+async def test_keeping_the_model_loaded_can_be_switched_off_again(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """Opt-in must be reversible: turning it off in Configure stops the warm-up."""
+    await _setup_home(hass)
+    _local_server(aioclient_mock)
+    aioclient_mock.post(
+        "http://llm.invalid:11434/api/chat", json={"message": {"content": "ok"}}
+    )
+    profile = ServerProfile(max_options=26, base_url=LOCAL, model="nimble")
+    entry = await _add_entry(
+        hass,
+        aioclient_mock,
+        base_url=LOCAL,
+        model="nimble",
+        server_profile=profile.as_dict(),
+        llm_backend="ollama",
+        llm_base_url="http://llm.invalid:11434",
+        llm_model="a-model",
+        llm_keep_loaded=True,
+    )
+    await hass.async_block_till_done()
+
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_BASE_URL: LOCAL, CONF_API_TIMEOUT: profile.timeout},
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_MODEL: "nimble"}
+    )
+    llm_form = result["data_schema"].schema
+    keep_default = next(k for k in llm_form if k == "llm_keep_loaded").default()
+    assert keep_default is True, "the form shows what is currently set"
+
+    aioclient_mock.mock_calls.clear()
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            "llm_backend": "ollama",
+            "llm_base_url": "http://llm.invalid:11434",
+            "llm_model": "a-model",
+            "llm_keep_loaded": False,
+        },
+    )
+    await hass.async_block_till_done()
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data["llm_keep_loaded"] is False
+    assert entry.data["llm_model"] == "a-model", "other LLM settings survive"
+    assert _chat_calls(aioclient_mock) == [], "reloaded without a warm-up"

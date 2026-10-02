@@ -13,7 +13,6 @@ rebuilt lazily when a registry or exposure event marks it dirty. Current
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -44,7 +43,7 @@ from homeassistant.helpers import (
 )
 from homeassistant.util import dt as dt_util
 
-from .const import LOGGER, MAX_CHOICE_OPTIONS
+from .const import LOGGER
 
 # Attributes worth sending, per domain. Home Assistant's own helper uses one
 # flat set for every domain; most of those values are noise outside the domain
@@ -64,8 +63,7 @@ _DOMAIN_ATTRS: dict[str, tuple[str, ...]] = {
     "vacuum": (),
 }
 
-# Domains the user can actually command. Used only to bias the prefilter in
-# very large homes.
+# Domains the user can actually command.
 CONTROLLABLE_DOMAINS = frozenset(
     {
         "light",
@@ -84,55 +82,6 @@ CONTROLLABLE_DOMAINS = frozenset(
         "input_boolean",
     }
 )
-
-# Words that point at a domain, for the prefilter.
-_DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "light": ("light", "lights", "lamp", "lamps", "bulb", "brightness", "dim"),
-    "switch": ("switch", "plug", "outlet", "socket"),
-    "cover": (
-        "blind",
-        "blinds",
-        "shade",
-        "shades",
-        "curtain",
-        "curtains",
-        "garage",
-        "shutter",
-        "awning",
-    ),
-    "lock": ("lock", "locks", "unlock", "deadbolt"),
-    "fan": ("fan", "fans"),
-    "climate": (
-        "thermostat",
-        "heating",
-        "heat",
-        "cooling",
-        "ac",
-        "aircon",
-        "temperature",
-    ),
-    "media_player": (
-        "speaker",
-        "speakers",
-        "tv",
-        "music",
-        "volume",
-        "play",
-        "playing",
-        "song",
-    ),
-    "scene": ("scene", "mood", "preset"),
-    "script": ("routine", "script"),
-    "vacuum": ("vacuum", "hoover", "roomba"),
-    "humidifier": ("humidifier", "dehumidifier", "humidity"),
-    "water_heater": ("boiler", "water heater"),
-}
-
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
-
-
-def _tokens(text: str) -> set[str]:
-    return set(_TOKEN_RE.findall(text.lower()))
 
 
 @dataclass(slots=True, frozen=True)
@@ -425,73 +374,6 @@ class EntityCatalog:
                 f"{_render_state(self.hass, entity, state)}"
             )
         return "\n".join(lines)
-
-    # -- large homes ----------------------------------------------------------
-
-    def prefilter(
-        self, utterance: str, speaker_area_id: str | None
-    ) -> tuple[tuple[CatalogEntity, ...], bool]:
-        """Narrow the catalog to at most ``MAX_CHOICE_OPTIONS`` entities.
-
-        Jev allows 255 options per Choice, so a home larger than that cannot be
-        offered whole. Returns the chosen entities and whether narrowing
-        actually happened (the router uses that to decide whether a
-        second-stage, area-scoped request is worth making).
-        """
-        self._ensure_fresh()
-        if len(self._entities) <= MAX_CHOICE_OPTIONS:
-            return self._entities, False
-
-        words = _tokens(utterance)
-        area_hits = {a.area_id for a in self._areas if _tokens(a.name) & words}
-        domain_hits = {
-            domain
-            for domain, keywords in _DOMAIN_KEYWORDS.items()
-            if any(k in utterance.lower() for k in keywords)
-        }
-        now = dt_util.utcnow()
-
-        def score(entity: CatalogEntity) -> float:
-            value = 0.0
-            if speaker_area_id and entity.area_id == speaker_area_id:
-                value += 40
-            value += 30 * len(_tokens(" ".join(entity.all_names)) & words)
-            if entity.area_id in area_hits:
-                value += 20
-            if entity.domain in domain_hits:
-                value += 15
-            if entity.domain in CONTROLLABLE_DOMAINS:
-                value += 5
-            state = self.hass.states.get(entity.entity_id)
-            if state is not None and (now - state.last_changed).total_seconds() < 600:
-                value += 3
-            return value
-
-        ranked = sorted(
-            self._entities,
-            key=lambda e: (-score(e), e.area_name or "￿", e.domain, e.name),
-        )
-        kept = tuple(ranked[:MAX_CHOICE_OPTIONS])
-        # Restore the stable display order within the kept set.
-        kept = tuple(sorted(kept, key=lambda e: (e.area_name or "￿", e.domain, e.name)))
-        LOGGER.debug(
-            "Catalog prefiltered %s -> %s entities for %r",
-            len(self._entities),
-            len(kept),
-            utterance,
-        )
-        return kept, True
-
-    def in_area(
-        self, area_id: str, domain: str | None = None
-    ) -> tuple[CatalogEntity, ...]:
-        """Entities in one area, for the second-stage request in large homes."""
-        self._ensure_fresh()
-        return tuple(
-            e
-            for e in self._entities
-            if e.area_id == area_id and (domain is None or e.domain == domain)
-        )
 
 
 def _render_state(

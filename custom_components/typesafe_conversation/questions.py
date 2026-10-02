@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .const import MAX_CHOICE_OPTIONS
+from .const import LOGGER, MAX_CHOICE_OPTIONS
 from .entities import CatalogArea, CatalogEntity
 from .extraction import COLOR_NAMES, COLOR_TEMP_PRESETS, Extraction
 
@@ -428,7 +428,7 @@ def _target_area_question(areas: tuple[CatalogArea, ...]) -> Question:
     }
 
 
-def _target_entity_question(
+def target_entity_question(
     entities: tuple[CatalogEntity, ...], inline_descriptions: bool
 ) -> Question:
     if inline_descriptions:
@@ -496,8 +496,17 @@ def _value_pick_question(extraction: Extraction) -> Question:
     }
 
 
-def _color_pick_question() -> Question:
-    criteria: dict[str, Any] = dict.fromkeys(COLOR_NAMES)
+def _color_pick_question(
+    extraction: Extraction | None = None, max_options: int = MAX_CHOICE_OPTIONS
+) -> Question:
+    presets = 5  # the whites below
+    if len(COLOR_NAMES) + presets + 1 <= max_options or extraction is None:
+        names: tuple[str, ...] = COLOR_NAMES
+    else:
+        # A small-cap server cannot take every colour, but it only needs the
+        # ones the user said; descriptive requests ("cosy") map to the whites.
+        names = extraction.colors_named
+    criteria: dict[str, Any] = dict.fromkeys(names)
     criteria.update(
         {
             "warm_white": "A warm, yellowish white, as in 'warmer' or 'cosy'.",
@@ -507,6 +516,8 @@ def _color_pick_question() -> Question:
             "daylight": "A bright, blue-white daylight colour.",
         }
     )
+    # Whatever the cap, keep a slot for NO_VALUE; named colours go first.
+    criteria = dict(list(criteria.items())[: max(1, max_options - 1)])
     criteria[NO_VALUE] = "No colour is being requested."
     return {
         "type": "choice",
@@ -564,21 +575,35 @@ def build_questions(
     domains: tuple[str, ...],
     extraction: Extraction,
     inline_descriptions: bool = False,
+    max_options: int = MAX_CHOICE_OPTIONS,
 ) -> QuestionSet:
     """Assemble every question for one request.
 
     The structural part (everything except the conditional questions) depends
     only on the catalog, so callers cache it against the catalog generation.
+
+    ``max_options`` is the server's cap on options per Choice. A home with more
+    entities than that cannot be offered in one ``target_entity`` question, so
+    it is left out here and asked in a second, narrower request instead (see
+    ``hierarchy``). The full catalogue still goes in the state either way: the
+    cap limits options, not state.
     """
     questions: QuestionSet = dict(STATIC_QUESTIONS)
 
     if areas:
-        questions[Q_TARGET_AREA] = _target_area_question(areas)
-    if entities:
-        questions[Q_TARGET_ENTITY] = _target_entity_question(
+        if fits(len(areas) + 1, max_options):
+            questions[Q_TARGET_AREA] = _target_area_question(areas)
+        else:
+            LOGGER.warning(
+                "%s areas exceed this server's %s-option cap; not asking for one",
+                len(areas),
+                max_options,
+            )
+    if entities and fits(len(entities) + 1, max_options):
+        questions[Q_TARGET_ENTITY] = target_entity_question(
             entities, inline_descriptions
         )
-    if domains:
+    if domains and fits(len(domains) + 1, max_options):
         questions[Q_TARGET_DOMAIN] = _target_domain_question(domains)
 
     for domain in domains:
@@ -588,22 +613,28 @@ def build_questions(
     if extraction.values:
         questions[Q_VALUE_PICK] = _value_pick_question(extraction)
     if extraction.colors_mentioned:
-        questions[Q_COLOR_PICK] = _color_pick_question()
+        questions[Q_COLOR_PICK] = _color_pick_question(extraction, max_options)
     if extraction.media_chunks:
         if "media_player" in domains:
             questions[Q_MEDIA_SPAN] = _media_span_question(extraction)
         if "todo" in domains:
             questions[Q_LIST_ITEM_SPAN] = _list_item_span_question(extraction)
 
-    validate_questions(questions)
+    validate_questions(questions, max_options)
     return questions
 
 
-def validate_questions(questions: QuestionSet) -> None:
-    """Catch anything the API would reject with a 422.
+def fits(options: int, max_options: int) -> bool:
+    return options <= max_options
 
-    A 422 in production means this validator has a hole, so it runs on every
-    build rather than only in tests.
+
+def validate_questions(
+    questions: QuestionSet, max_options: int = MAX_CHOICE_OPTIONS
+) -> None:
+    """Catch anything the server would reject before sending it.
+
+    A rejection in production means this validator has a hole, so it runs on
+    every build rather than only in tests.
     """
     if not questions:
         raise QuestionSetError("Question set is empty")
@@ -618,10 +649,10 @@ def validate_questions(questions: QuestionSet) -> None:
             criteria = question.get("criteria")
             if not isinstance(criteria, dict) or len(criteria) < 2:
                 raise QuestionSetError(f"{key}: a Choice needs at least 2 options")
-            if len(criteria) > MAX_CHOICE_OPTIONS + 5:
+            if not fits(len(criteria), max_options):
                 raise QuestionSetError(
-                    f"{key}: {len(criteria)} options exceeds the cap of "
-                    f"{MAX_CHOICE_OPTIONS + 5}"
+                    f"{key}: {len(criteria)} options exceeds this server's cap "
+                    f"of {max_options}"
                 )
             for option in criteria:
                 if not isinstance(option, str) or not option:
@@ -671,5 +702,7 @@ __all__ = [
     "action_question_id",
     "build_questions",
     "estimate_tokens",
+    "fits",
+    "target_entity_question",
     "validate_questions",
 ]

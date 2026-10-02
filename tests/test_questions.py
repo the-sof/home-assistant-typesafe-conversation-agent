@@ -9,7 +9,12 @@ from custom_components.typesafe_conversation.const import MAX_CHOICE_OPTIONS
 from custom_components.typesafe_conversation.entities import CatalogEntity
 from custom_components.typesafe_conversation.extraction import extract
 from custom_components.typesafe_conversation.questions import (
+    NO_VALUE,
+    Q_COLOR_PICK,
+    Q_TARGET_DOMAIN,
+    Q_TARGET_ENTITY,
     QuestionSetError,
+    _color_pick_question,
     build_questions,
     estimate_tokens,
     validate_questions,
@@ -74,8 +79,8 @@ def test_conditional_questions_only_appear_when_earned():
     assert "30%" in with_value["value_pick"]["criteria"]
 
 
-def test_choice_cap_is_enforced():
-    entities = tuple(
+def _lights(count: int) -> tuple[CatalogEntity, ...]:
+    return tuple(
         CatalogEntity(
             entity_id=f"light.l{i}",
             name=f"Light {i}",
@@ -87,15 +92,81 @@ def test_choice_cap_is_enforced():
             device_class=None,
             supported_features=0,
         )
-        for i in range(MAX_CHOICE_OPTIONS + 50)
+        for i in range(count)
     )
-    with pytest.raises(QuestionSetError, match="exceeds the cap"):
-        build_questions(
-            entities=entities,
-            areas=(),
-            domains=("light",),
-            extraction=extract("", want_media=False, want_color=False),
-        )
+
+
+def test_a_home_over_the_cap_leaves_the_entity_for_a_second_request():
+    """Ollama caps a Choice at 26 options; a 30-entity home can't be offered whole.
+
+    The entity question is left for the second stage, while the questions that
+    narrow it down - domain, area - are still asked in the first.
+    """
+    built = build_questions(
+        entities=_lights(30),
+        areas=(),
+        domains=("light",),
+        extraction=extract("", want_media=False, want_color=False),
+        max_options=26,
+    )
+    assert Q_TARGET_ENTITY not in built
+    assert Q_TARGET_DOMAIN in built
+
+
+def test_a_home_within_the_cap_is_asked_in_one_go():
+    built = build_questions(
+        entities=_lights(25),
+        areas=(),
+        domains=("light",),
+        extraction=extract("", want_media=False, want_color=False),
+        max_options=26,
+    )
+    assert len(built[Q_TARGET_ENTITY]["criteria"]) == 26, "25 lights + the escape"
+
+
+def test_choice_cap_is_enforced():
+    oversized = {
+        "x": {
+            "type": "choice",
+            "instructions": "pick one",
+            "criteria": {f"o{i}": None for i in range(27)},
+        }
+    }
+    with pytest.raises(QuestionSetError, match="exceeds this server's cap of 26"):
+        validate_questions(oversized, max_options=26)
+    validate_questions(oversized, max_options=MAX_CHOICE_OPTIONS)
+
+
+def test_a_small_cap_offers_only_the_colours_that_were_said():
+    """Every colour is 58 options; a 26-option server only needs those named."""
+    extraction = extract("make it red", want_media=False, want_color=True)
+    built = build_questions(
+        entities=_lights(3),
+        areas=(),
+        domains=("light",),
+        extraction=extraction,
+        max_options=26,
+    )
+    options = set(built[Q_COLOR_PICK]["criteria"])
+    assert "red" in options
+    assert "blue" not in options
+    assert {"warm_white", "daylight"} <= options, "descriptive requests still map"
+    assert len(options) <= 26
+
+    roomy = build_questions(
+        entities=_lights(3),
+        areas=(),
+        domains=("light",),
+        extraction=extraction,
+    )
+    assert "blue" in roomy[Q_COLOR_PICK]["criteria"], "TypeSafe still gets them all"
+
+
+def test_the_colour_question_never_exceeds_a_tiny_cap():
+    """Below the five whites plus "none", the whites give way to what was said."""
+    extraction = extract("make it red", want_media=False, want_color=True)
+    question = _color_pick_question(extraction, max_options=3)
+    assert list(question["criteria"]) == ["red", "warm_white", NO_VALUE]
 
 
 def test_the_whole_request_fits_the_context_budget():

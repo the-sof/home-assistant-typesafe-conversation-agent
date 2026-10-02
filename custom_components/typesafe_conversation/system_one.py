@@ -1,4 +1,9 @@
-"""Async client for the TypeSafe System One (Jev) API.
+"""Async client for the System One API.
+
+TypeSafe's hosted Jev is the default, but any server that speaks the same API
+works: Ollama serves local decision models on it, for instance. Servers differ
+in limits the API does not report, so ``async_probe`` measures them once at
+setup and the result travels as a ``ServerProfile``.
 
 Deliberately not the ``typesafe-sdk`` package: it depends on ``httpx2``, which
 Home Assistant does not ship, and the endpoint is a single POST. Using the
@@ -8,8 +13,11 @@ aiohttp session HA already manages keeps the integration dependency-free.
 from __future__ import annotations
 
 import asyncio
+import json
+import math
+import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 import aiohttp
@@ -20,10 +28,19 @@ from .const import (
     API_TIMEOUT,
     CIRCUIT_FAILURE_THRESHOLD,
     CIRCUIT_RESET_SECONDS,
+    DEFAULT_BASE_URL,
     LOGGER,
-    TYPESAFE_API_URL,
-    TYPESAFE_MODELS_URL,
+    MAX_CHOICE_OPTIONS,
+    MEASURE_TIMEOUT,
+    MODELS_PATH,
+    PROBE_MAX_OPTIONS,
+    PROBE_TIMEOUT,
+    SYSTEM_ONE_PATH,
+    TIMEOUT_MARGIN,
 )
+
+_REJECTED = frozenset({400, 413, 422})
+"""Statuses meaning "this request breaks a rule", as opposed to an outage."""
 
 
 class SystemOneError(Exception):
@@ -35,7 +52,12 @@ class SystemOneAuthError(SystemOneError):
 
 
 class SystemOneRequestError(SystemOneError):
-    """Our request was malformed. This is a bug in our question builder."""
+    """The server refused this request, and retrying will not change that.
+
+    Too many options, a prompt larger than the model's context, a model that is
+    not a decision model or is not installed. ``str(err)`` carries the server's
+    own explanation, which is usually exactly what the user needs to fix it.
+    """
 
 
 class SystemOneUnavailableError(SystemOneError):
@@ -107,6 +129,72 @@ class SystemOneResponse:
         return answer.noul if isinstance(answer, NoulAnswer) else None
 
 
+@dataclass(slots=True, frozen=True)
+class ServerProfile:
+    """What one server and model can take, as measured at setup.
+
+    The defaults describe TypeSafe's hosted API, which is what every entry
+    created before discovery existed points at.
+    """
+
+    max_options: int = MAX_CHOICE_OPTIONS
+    """Most options one Choice may offer, escape options included."""
+
+    timeout: float = API_TIMEOUT
+    cold_load_s: float | None = None
+    """How long the first answer took when the model had to be loaded."""
+
+    typical_s: float | None = None
+    """One request shaped like a real one - this home, the full question set -
+    timed at setup. What a voice command actually costs on this server."""
+
+    num_ctx: int | None = None
+    """Context window per rendered prompt, when the server reports it."""
+
+    base_url: str | None = None
+    model: str | None = None
+    """What was probed. A change of either makes the profile stale."""
+
+    def matches(self, base_url: str, model: str) -> bool:
+        return self.base_url == normalise_base_url(
+            base_url
+        ) and self.model == normalise_model(model)
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def with_typical(self, typical_s: float) -> ServerProfile:
+        """Fold in the timed request, and derive the default timeout from it.
+
+        The model may have been unloaded since the last request - Ollama does
+        that after its own idle period, which is left to the server - so the
+        timeout allows for a cold load on top of a typical request.
+        """
+        budget = (self.cold_load_s or 0.0) + typical_s
+        return replace(
+            self,
+            typical_s=round(typical_s, 2),
+            timeout=max(API_TIMEOUT, math.ceil(TIMEOUT_MARGIN * budget)),
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> ServerProfile:
+        if not data:
+            return cls()
+        known = set(cls.__dataclass_fields__)
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+def normalise_base_url(url: str | None) -> str:
+    return (url or DEFAULT_BASE_URL).strip().rstrip("/")
+
+
+def normalise_model(name: str) -> str:
+    """Ollama lists ``nimble:latest`` for a model requested as ``nimble``."""
+    name = name.strip()
+    return name[: -len(":latest")] if name.endswith(":latest") else name
+
+
 def _parse_answer(key: str, payload: dict[str, Any]) -> Answer:
     kind = payload.get("type")
     if kind == "choice":
@@ -133,14 +221,30 @@ class SystemOneClient:
     def __init__(
         self,
         session: aiohttp.ClientSession,
-        api_key: str,
+        api_key: str | None,
         model: str,
+        *,
+        base_url: str | None = None,
+        profile: ServerProfile | None = None,
     ) -> None:
         self._session = session
-        self._api_key = api_key
+        self._api_key = api_key or None
         self._model = model
+        self._base = normalise_base_url(base_url)
+        self.profile = profile or ServerProfile()
         self._consecutive_failures = 0
         self._open_until = 0.0
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def _headers(self) -> dict[str, str]:
+        """A local server usually takes no key, so send one only if we have it."""
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
 
     @property
     def circuit_open(self) -> bool:
@@ -152,15 +256,19 @@ class SystemOneClient:
         return bool(self._open_until)
 
     async def async_validate(self) -> list[str]:
-        """Check the key and return the model names the account can use."""
+        """Check the endpoint and key, and return the models it offers.
+
+        TypeSafe answers ``{"models": [{"name": ...}]}``; Ollama and other
+        OpenAI-style servers answer ``{"data": [{"id": ...}]}``. Both are read.
+        """
         try:
             async with self._session.get(
-                TYPESAFE_MODELS_URL,
-                headers={"Authorization": f"Bearer {self._api_key}"},
+                self._base + MODELS_PATH,
+                headers=self._headers(),
                 timeout=aiohttp.ClientTimeout(total=API_TIMEOUT),
             ) as response:
                 if response.status in (401, 403):
-                    raise SystemOneAuthError("Invalid TypeSafe API key")
+                    raise SystemOneAuthError("The API key was rejected")
                 response.raise_for_status()
                 payload = await response.json()
         except SystemOneError:
@@ -168,8 +276,156 @@ class SystemOneClient:
         except aiohttp.ClientError as err:
             raise SystemOneUnavailableError(str(err)) from err
         except TimeoutError as err:
-            raise SystemOneUnavailableError("Timed out reaching TypeSafe") from err
-        return [m["name"] for m in payload.get("models", [])]
+            raise SystemOneUnavailableError("Timed out reaching the server") from err
+        if not isinstance(payload, dict):
+            raise SystemOneUnavailableError("Unexpected model list from the server")
+        names = [
+            m.get("name") for m in payload.get("models") or [] if isinstance(m, dict)
+        ]
+        names += [m.get("id") for m in payload.get("data") or [] if isinstance(m, dict)]
+        return list(
+            dict.fromkeys(normalise_model(n) for n in names if isinstance(n, str) and n)
+        )
+
+    async def async_decision_models(self, names: list[str]) -> list[str]:
+        """Narrow a model list to decision models, where the server can say.
+
+        Ollama lists every model it has, chat models included, and reports a
+        ``decision`` capability through ``/api/show``. That endpoint is Ollama's
+        own, so a server without it simply keeps the full list.
+        """
+        kept: list[str] = []
+        for name in names:
+            info = await self._show(name)
+            if info is None:
+                return names
+            capabilities = info.get("capabilities")
+            if not isinstance(capabilities, list) or "decision" in capabilities:
+                kept.append(name)
+        return kept or names
+
+    async def async_probe(self) -> ServerProfile:
+        """Measure what this server and model can take.
+
+        Every step uses a one-word state, so accepted probes cost almost
+        nothing. A probe that breaks a limit is rejected before any model loads,
+        so the option cap is found by a binary search over rejections.
+
+        Timing comes separately, from ``async_time_request``: a one-word state
+        says nothing about how long a real request takes.
+
+        Raises ``SystemOneRequestError`` with the server's own message when the
+        model cannot answer at all - not installed, or not a decision model.
+        """
+        status, cold, detail = await self._probe(3)
+        if status != 200:
+            raise _probe_failure(status, detail)
+
+        max_options = PROBE_MAX_OPTIONS
+        status, _, detail = await self._probe(PROBE_MAX_OPTIONS)
+        if status != 200:
+            if status not in _REJECTED:
+                raise _probe_failure(status, detail)
+            accepted, rejected = 3, PROBE_MAX_OPTIONS
+            while rejected - accepted > 1:
+                middle = (accepted + rejected) // 2
+                status, _, detail = await self._probe(middle)
+                if status == 200:
+                    accepted = middle
+                elif status in _REJECTED:
+                    rejected = middle
+                else:
+                    raise _probe_failure(status, detail)
+            max_options = accepted
+
+        num_ctx = None
+        if (info := await self._show(self._model)) is not None:
+            num_ctx = _num_ctx(info.get("parameters"))
+
+        profile = ServerProfile(
+            max_options=max_options,
+            cold_load_s=round(cold, 2),
+            num_ctx=num_ctx,
+            base_url=self._base,
+            model=normalise_model(self._model),
+        )
+        LOGGER.debug("Probed %s for %s: %s", self._base, self._model, profile)
+        return profile
+
+    async def async_time_request(
+        self, state: Any, questions: dict[str, dict[str, Any]]
+    ) -> float:
+        """Send one real-sized request, and return how long it took.
+
+        The answer is discarded. The state is the home as it is now, which the
+        server has not seen before, so its prompt cache cannot flatter the
+        figure the way repeating an identical request would.
+        """
+        body = {"model": self._model, "state": state, "questions": questions}
+        started = time.monotonic()
+        try:
+            async with self._session.post(
+                self._base + SYSTEM_ONE_PATH,
+                json=body,
+                headers=self._headers(),
+                timeout=aiohttp.ClientTimeout(total=MEASURE_TIMEOUT),
+            ) as response:
+                if response.status != 200:
+                    raise _probe_failure(response.status, await _error_detail(response))
+        except SystemOneError:
+            raise
+        except aiohttp.ClientError as err:
+            raise SystemOneUnavailableError(str(err)) from err
+        except TimeoutError as err:
+            raise SystemOneUnavailableError(
+                f"A typical request took over {MEASURE_TIMEOUT:.0f}s"
+            ) from err
+        return time.monotonic() - started
+
+    async def _probe(self, options: int) -> tuple[int, float, str]:
+        body: dict[str, Any] = {
+            "model": self._model,
+            "state": "x",
+            "questions": {
+                "probe": {
+                    "type": "choice",
+                    "instructions": "Pick any option.",
+                    "criteria": {f"o{i}": None for i in range(options)},
+                }
+            },
+        }
+        started = time.monotonic()
+        try:
+            async with self._session.post(
+                self._base + SYSTEM_ONE_PATH,
+                json=body,
+                headers=self._headers(),
+                timeout=aiohttp.ClientTimeout(total=PROBE_TIMEOUT),
+            ) as response:
+                detail = "" if response.status == 200 else await _error_detail(response)
+                return response.status, time.monotonic() - started, detail
+        except aiohttp.ClientError as err:
+            raise SystemOneUnavailableError(str(err)) from err
+        except TimeoutError as err:
+            raise SystemOneUnavailableError(
+                f"No answer within {PROBE_TIMEOUT:.0f}s"
+            ) from err
+
+    async def _show(self, model: str) -> dict[str, Any] | None:
+        """Ollama's model metadata, or None from any server that lacks it."""
+        try:
+            async with self._session.post(
+                self._base + "/api/show",
+                json={"model": model},
+                headers=self._headers(),
+                timeout=aiohttp.ClientTimeout(total=API_TIMEOUT),
+            ) as response:
+                if response.status != 200:
+                    return None
+                payload = await response.json(content_type=None)
+        except aiohttp.ClientError, TimeoutError, ValueError:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     async def async_ask(
         self, state: Any, questions: dict[str, dict[str, Any]]
@@ -178,7 +434,13 @@ class SystemOneClient:
         if self.circuit_open:
             raise SystemOneUnavailableError("System One circuit breaker is open")
 
-        body = {"state": state, "model": self._model, "questions": questions}
+        # No keep_alive: how long a model stays loaded is the server owner's
+        # call. Someone sharing the machine may well want it unloaded.
+        body: dict[str, Any] = {
+            "state": state,
+            "model": self._model,
+            "questions": questions,
+        }
         started = time.monotonic()
         last_error: Exception | None = None
 
@@ -239,24 +501,26 @@ class SystemOneClient:
     async def _post(self, body: dict[str, Any]) -> dict[str, Any]:
         try:
             async with self._session.post(
-                TYPESAFE_API_URL,
+                self._base + SYSTEM_ONE_PATH,
                 json=body,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=aiohttp.ClientTimeout(total=API_TIMEOUT),
+                headers=self._headers(),
+                timeout=aiohttp.ClientTimeout(total=self.profile.timeout),
             ) as response:
                 if response.status in (401, 403):
-                    raise SystemOneAuthError("Invalid TypeSafe API key")
-                if response.status == 422:
-                    detail = await response.text()
-                    # Our question builder produced something invalid. The body
-                    # names the offending field, so log it loudly - the
-                    # build-time validator should have caught this.
-                    raise SystemOneRequestError(
-                        f"The API rejected the request: {detail}"
+                    raise SystemOneAuthError("The API key was rejected")
+                if response.status in _REJECTED or response.status == 404:
+                    # Deterministic: the same request would fail the same way,
+                    # so retrying only burns time. The server's message names
+                    # the problem - too many options, a prompt larger than the
+                    # model's context, a missing model - so log it verbatim.
+                    detail = await _error_detail(response)
+                    LOGGER.warning(
+                        "%s rejected the request (%s): %s",
+                        self._base,
+                        response.status,
+                        detail,
                     )
+                    raise SystemOneRequestError(detail)
                 if response.status in (429, 529):
                     raise _RetryableError(
                         f"The API returned {response.status}",
@@ -304,14 +568,49 @@ def _parse_retry_after(value: str | None) -> float | None:
         return None
 
 
+async def _error_detail(response: aiohttp.ClientResponse) -> str:
+    """The server's explanation, from ``{"error": ...}`` or plain text."""
+    text = (await response.text()).strip()
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        for key in ("error", "detail", "message"):
+            if isinstance(value := payload.get(key), str) and value:
+                text = value
+                break
+    status = f"HTTP {response.status}"
+    return f"{text[:300]} ({status})" if text else status
+
+
+def _probe_failure(status: int, detail: str) -> SystemOneError:
+    if status in (401, 403):
+        return SystemOneAuthError("The API key was rejected")
+    if status in _REJECTED or status == 404:
+        return SystemOneRequestError(detail)
+    return SystemOneUnavailableError(detail)
+
+
+def _num_ctx(parameters: Any) -> int | None:
+    """Read ``num_ctx`` out of Ollama's plain-text ``parameters`` block."""
+    if not isinstance(parameters, str):
+        return None
+    match = re.search(r"^\s*num_ctx\s+(\d+)\s*$", parameters, re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
 __all__ = [
     "ChoiceAnswer",
     "NoulAnswer",
     "ScoreAnswer",
+    "ServerProfile",
     "SystemOneAuthError",
     "SystemOneClient",
     "SystemOneError",
     "SystemOneRequestError",
     "SystemOneResponse",
     "SystemOneUnavailableError",
+    "normalise_base_url",
+    "normalise_model",
 ]

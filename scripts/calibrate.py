@@ -7,6 +7,13 @@ about. It talks to the API directly and does not need Home Assistant running.
 
     TYPESAFE_API_KEY=... .venv/bin/python scripts/calibrate.py
     .venv/bin/python scripts/calibrate.py --csv out.csv --home tests/fixtures/home.json
+
+Any System One server works, which is how a local model's thresholds get
+re-fitted. Pass the cap the integration discovered for it (diagnostics show
+it); a home over the cap leaves out target_entity, as the integration does:
+
+    .venv/bin/python scripts/calibrate.py --base-url http://localhost:11434 \\
+        --model nimble --max-options 26 --timeout 600
 """
 
 from __future__ import annotations
@@ -26,8 +33,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import aiohttp
 
 from custom_components.typesafe_conversation.const import (
+    DEFAULT_BASE_URL,
     DEFAULT_MODEL,
-    TYPESAFE_API_URL,
+    MAX_CHOICE_OPTIONS,
+    SYSTEM_ONE_PATH,
 )
 from custom_components.typesafe_conversation.entities import CatalogArea, CatalogEntity
 from custom_components.typesafe_conversation.extraction import extract
@@ -93,14 +102,21 @@ def load_home(
 
 
 async def ask(
-    session: aiohttp.ClientSession, key: str, model: str, state: dict, questions: dict
+    session: aiohttp.ClientSession,
+    key: str | None,
+    model: str,
+    state: dict,
+    questions: dict,
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    timeout: float = 30,
 ) -> tuple[dict, float]:
     started = time.monotonic()
     async with session.post(
-        TYPESAFE_API_URL,
+        base_url.rstrip("/") + SYSTEM_ONE_PATH,
         json={"state": state, "model": model, "questions": questions},
-        headers={"Authorization": f"Bearer {key}"},
-        timeout=aiohttp.ClientTimeout(total=30),
+        headers={"Authorization": f"Bearer {key}"} if key else {},
+        timeout=aiohttp.ClientTimeout(total=timeout),
     ) as response:
         body = await response.json()
         if response.status != 200:
@@ -117,6 +133,18 @@ async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--home", type=Path, default=Path("tests/fixtures/home.json"))
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--base-url",
+        default=os.environ.get("TYPESAFE_BASE_URL", DEFAULT_BASE_URL),
+        help="any System One server (default: $TYPESAFE_BASE_URL, then TypeSafe)",
+    )
+    parser.add_argument(
+        "--max-options",
+        type=int,
+        default=MAX_CHOICE_OPTIONS,
+        help="the server's option cap per Choice (Ollama: 26)",
+    )
+    parser.add_argument("--timeout", type=float, default=30, help="seconds per call")
     parser.add_argument("--csv", type=Path)
     parser.add_argument("--only", help="run just the utterances containing this text")
     parser.add_argument(
@@ -133,7 +161,8 @@ async def main() -> None:
     args = parser.parse_args()
 
     key = os.environ.get("TYPESAFE_API_KEY")
-    if not key:
+    if not key and args.base_url.rstrip("/") == DEFAULT_BASE_URL:
+        # Only TypeSafe's own API needs one; a local server usually does not.
         raise SystemExit("TYPESAFE_API_KEY is not set (try: set -a; . ./.env; set +a)")
 
     home, entities, areas, domains = load_home(args.home)
@@ -158,6 +187,7 @@ async def main() -> None:
                 areas=areas,
                 domains=domains,
                 extraction=extraction,
+                max_options=args.max_options,
             )
             state = {
                 "request": {
@@ -169,7 +199,15 @@ async def main() -> None:
                 },
                 "home": home,
             }
-            body, latency = await ask(session, key, args.model, state, questions)
+            body, latency = await ask(
+                session,
+                key,
+                args.model,
+                state,
+                questions,
+                base_url=args.base_url,
+                timeout=args.timeout,
+            )
             answers = body["answers"]
             usage = body.get("usage", {})
             total_in += usage.get("input_tokens", 0)

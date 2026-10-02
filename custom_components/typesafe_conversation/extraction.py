@@ -181,6 +181,9 @@ class Extraction:
 
     values: tuple[ValueCandidate, ...] = ()
     colors_mentioned: bool = False
+    colors_named: tuple[str, ...] = ()
+    """Colour names said outright, so a server with a small option cap can be
+    offered just those instead of every colour."""
     media_chunks: tuple[str, ...] = ()
 
     @property
@@ -267,6 +270,12 @@ def mentions_color(utterance: str) -> bool:
     )
 
 
+def colors_named(utterance: str) -> tuple[str, ...]:
+    """Colour names the utterance says outright, in the order of COLOR_NAMES."""
+    lowered = utterance.lower()
+    return tuple(name for name in COLOR_NAMES if re.search(rf"\b{name}\b", lowered))
+
+
 def media_chunks(utterance: str) -> tuple[str, ...]:
     """Split the utterance into candidate 'what to play' fragments.
 
@@ -293,6 +302,7 @@ def extract(utterance: str, *, want_media: bool, want_color: bool) -> Extraction
     return Extraction(
         values=find_values(utterance),
         colors_mentioned=want_color and mentions_color(utterance),
+        colors_named=colors_named(utterance) if want_color else (),
         media_chunks=media_chunks(utterance) if want_media else (),
     )
 
@@ -302,6 +312,7 @@ __all__ = [
     "COLOR_TEMP_PRESETS",
     "Extraction",
     "ValueCandidate",
+    "colors_named",
     "extract",
     "find_values",
     "media_chunks",

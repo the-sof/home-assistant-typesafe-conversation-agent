@@ -20,6 +20,7 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import intent
 from homeassistant.util import dt as dt_util
 
+from . import hierarchy
 from . import questions as Q
 from .const import (
     CATALOG_SUMMARY_MAX_ENTITIES,
@@ -44,6 +45,63 @@ from .system_one import (
     SystemOneRequestError,
     SystemOneResponse,
 )
+
+
+def build_request(
+    hass: HomeAssistant,
+    catalog: EntityCatalog,
+    text: str,
+    *,
+    speaker_area_id: str | None,
+    max_options: int,
+    structural: dict[str, Any] | None = None,
+    inline_descriptions: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The state and questions for one utterance - the first request of a turn.
+
+    Shared with setup, which times one of these to set the request timeout, so
+    the request it measures is exactly the shape a real command sends.
+    """
+    extraction = extract(
+        text,
+        want_media="media_player" in catalog.domains,
+        want_color="light" in catalog.domains,
+    )
+    if structural is None:
+        structural = Q.build_questions(
+            entities=catalog.entities,
+            areas=catalog.areas,
+            domains=catalog.domains,
+            extraction=extract("", want_media=False, want_color=False),
+            inline_descriptions=inline_descriptions,
+            max_options=max_options,
+        )
+    questions = dict(structural)
+    # Conditional questions depend on the utterance, not the catalog, so they
+    # are built fresh and never cached.
+    if extraction.values:
+        questions[Q.Q_VALUE_PICK] = Q._value_pick_question(extraction)
+    if extraction.colors_mentioned:
+        questions[Q.Q_COLOR_PICK] = Q._color_pick_question(extraction, max_options)
+    if extraction.media_chunks:
+        questions[Q.Q_MEDIA_SPAN] = Q._media_span_question(extraction)
+    Q.validate_questions(questions, max_options)
+
+    state = {
+        "request": {
+            "text": text,
+            "language": hass.config.language,
+            "spoken_from_area": speaker_area_id,
+            "local_time": dt_util.now().strftime("%Y-%m-%dT%H:%M"),
+            "weekday": dt_util.now().strftime("%A"),
+        },
+        "home": catalog.snapshot(catalog.entities),
+    }
+    return state, questions
+
+
+class _AskForRoom(Exception):
+    """No room was named and one kind of device alone is too many to offer."""
 
 
 @dataclass(slots=True)
@@ -98,14 +156,20 @@ class TypeSafeAgent:
         speaker_area_id = self._speaker_area(user_input)
         try:
             response, entities = await self._ask(text, speaker_area_id, chat_log)
-        except SystemOneRequestError:
-            # Our question builder produced something the API rejected. Already
-            # logged with the offending field; behave as if Jev were down.
+        except _AskForRoom:
+            return self._speech(user_input, "Which room?", continue_conversation=True)
+        except SystemOneRequestError as err:
+            # The server refused the request and would refuse it again: too
+            # many options, a prompt over the model's context, a missing model.
+            # Already logged verbatim; keep it in the diagnostics too, since it
+            # usually names the exact setting to change.
+            self._trace_failure(text, user_input, err)
             return await self._fallback(user_input, chat_log, None)
         except SystemOneError as err:
             LOGGER.warning(
                 "System One unavailable (%s); using the fallback ladder", err
             )
+            self._trace_failure(text, user_input, err)
             return await self._fallback(user_input, chat_log, None)
 
         plan = route(
@@ -148,6 +212,11 @@ class TypeSafeAgent:
             "relative_step": plan.relative_step,
             "text_slot": plan.text_slot,
             **plan.trace,
+            **(
+                {"entity_stage": stage}
+                if (stage := response.raw.get("entity_stage_plan"))
+                else {}
+            ),
         }
         LOGGER.debug(
             "Routed %r from %s -> %s (%s) in %sms, %s input tokens",
@@ -175,7 +244,27 @@ class TypeSafeAgent:
         )
         return await self._carry_out(plan, response, user_input, chat_log)
 
-    # -- the single Jev call --------------------------------------------------
+    def _trace_failure(
+        self,
+        text: str,
+        user_input: conversation.ConversationInput,
+        err: Exception,
+    ) -> None:
+        """Keep a failed request in the diagnostics, with the server's reason."""
+        if self._traces is None:
+            return
+        self._traces.append(
+            {
+                "utterance": text,
+                "device_id": user_input.device_id,
+                "satellite_id": user_input.satellite_id,
+                "from_satellite": user_input.satellite_id is not None,
+                "route": "error",
+                "reason": str(err),
+            }
+        )
+
+    # -- the System One call --------------------------------------------------
 
     async def _ask(
         self,
@@ -183,37 +272,54 @@ class TypeSafeAgent:
         speaker_area_id: str | None,
         chat_log: conversation.ChatLog | None,
     ) -> tuple[SystemOneResponse, tuple]:
-        entities, _narrowed = self.catalog.prefilter(text, speaker_area_id)
-        extraction = extract(
-            text,
-            want_media="media_player" in self.catalog.domains,
-            want_color="light" in self.catalog.domains,
-        )
-        questions = dict(self._structural_questions(entities))
-        # Conditional questions depend on the utterance, not the catalog, so
-        # they are built fresh and never cached.
-        if extraction.values:
-            questions[Q.Q_VALUE_PICK] = Q._value_pick_question(extraction)
-        if extraction.colors_mentioned:
-            questions[Q.Q_COLOR_PICK] = Q._color_pick_question()
-        if extraction.media_chunks:
-            questions[Q.Q_MEDIA_SPAN] = Q._media_span_question(extraction)
-        Q.validate_questions(questions)
+        """Ask everything in one call, plus a second when the home is too big.
 
-        state = {
-            "request": {
-                "text": text,
-                "language": self.hass.config.language,
-                "spoken_from_area": speaker_area_id,
-                "local_time": dt_util.now().strftime("%Y-%m-%dT%H:%M"),
-                "weekday": dt_util.now().strftime("%A"),
-            },
-            "home": self.catalog.snapshot(entities),
-        }
+        The whole catalogue always goes in the state. Only the ``target_entity``
+        question is bounded by the server's option cap; when the home exceeds
+        it, the first call leaves that question out and ``hierarchy`` plans a
+        second one over just the likeliest devices.
+        """
+        entities = self.catalog.entities
+        max_options = self.jev.profile.max_options
+        state, questions = build_request(
+            self.hass,
+            self.catalog,
+            text,
+            speaker_area_id=speaker_area_id,
+            max_options=max_options,
+            structural=self._structural_questions(entities),
+        )
         if chat_log is not None and (history := self._history(chat_log)):
             state["conversation"] = history
 
-        return await self.jev.async_ask(state, questions), entities
+        response = await self.jev.async_ask(state, questions)
+        if not hierarchy.needs_entity_stage(response):
+            return response, entities
+
+        plan = hierarchy.plan_entity_stage(response, entities, max_options=max_options)
+        LOGGER.debug("Entity stage for %r: %s", text, plan.trace)
+        if plan.ask_room is not None:
+            raise _AskForRoom
+        if plan.stage is None:
+            return response, entities
+
+        # Only the candidates go in the second state: the question is which of
+        # these few devices, and a small prompt is what keeps it quick.
+        second_state: dict[str, Any] = {
+            "request": state["request"],
+            "home": self.catalog.snapshot(plan.stage.candidates),
+        }
+        if "conversation" in state:
+            second_state["conversation"] = state["conversation"]
+        second_questions = hierarchy.entity_stage_questions(
+            plan.stage,
+            inline_descriptions=self.settings.inline_entity_descriptions,
+        )
+        Q.validate_questions(second_questions, max_options)
+        second = await self.jev.async_ask(second_state, second_questions)
+        merged = hierarchy.merge_entity_stage(response, second, plan.stage)
+        merged.raw["entity_stage_plan"] = plan.trace
+        return merged, entities
 
     def _structural_questions(self, entities: tuple) -> dict[str, Any]:
         """Cache the catalog-derived questions against the catalog generation.
@@ -227,7 +333,6 @@ class TypeSafeAgent:
             self._questions_cache is not None
             and self._questions_cache[0] == generation
             and self._questions_cache[1] == inline
-            and len(entities) == len(self.catalog.entities)
         ):
             return self._questions_cache[2]
 
@@ -237,9 +342,9 @@ class TypeSafeAgent:
             domains=self.catalog.domains,
             extraction=extract("", want_media=False, want_color=False),
             inline_descriptions=inline,
+            max_options=self.jev.profile.max_options,
         )
-        if len(entities) == len(self.catalog.entities):
-            self._questions_cache = (generation, inline, built)
+        self._questions_cache = (generation, inline, built)
         return built
 
     # -- acting on the plan ---------------------------------------------------
@@ -435,6 +540,8 @@ class TypeSafeAgent:
             response, entities = await self._ask(
                 text, self._speaker_area(user_input), chat_log
             )
+        except _AskForRoom:
+            return self._speech(user_input, "Which room?", continue_conversation=True)
         except SystemOneError:
             return await self._fallback(user_input, chat_log, None)
         plan = route(
@@ -655,4 +762,4 @@ def _join(items: list[str]) -> str:
     return f"{', '.join(items[:-1])} and {items[-1]}"
 
 
-__all__ = ["AgentSettings", "TypeSafeAgent"]
+__all__ = ["AgentSettings", "TypeSafeAgent", "build_request"]
