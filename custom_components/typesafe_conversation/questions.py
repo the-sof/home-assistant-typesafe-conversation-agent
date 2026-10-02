@@ -505,7 +505,7 @@ def _color_pick_question(
     else:
         # A small-cap server cannot take every colour, but it only needs the
         # ones the user said; descriptive requests ("cosy") map to the whites.
-        names = extraction.colors_named[: max(0, max_options - presets - 1)]
+        names = extraction.colors_named
     criteria: dict[str, Any] = dict.fromkeys(names)
     criteria.update(
         {
@@ -516,6 +516,8 @@ def _color_pick_question(
             "daylight": "A bright, blue-white daylight colour.",
         }
     )
+    # Whatever the cap, keep a slot for NO_VALUE; named colours go first.
+    criteria = dict(list(criteria.items())[: max(1, max_options - 1)])
     criteria[NO_VALUE] = "No colour is being requested."
     return {
         "type": "choice",

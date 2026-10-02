@@ -9,10 +9,12 @@ from custom_components.typesafe_conversation.const import MAX_CHOICE_OPTIONS
 from custom_components.typesafe_conversation.entities import CatalogEntity
 from custom_components.typesafe_conversation.extraction import extract
 from custom_components.typesafe_conversation.questions import (
+    NO_VALUE,
     Q_COLOR_PICK,
     Q_TARGET_DOMAIN,
     Q_TARGET_ENTITY,
     QuestionSetError,
+    _color_pick_question,
     build_questions,
     estimate_tokens,
     validate_questions,
@@ -158,6 +160,13 @@ def test_a_small_cap_offers_only_the_colours_that_were_said():
         extraction=extraction,
     )
     assert "blue" in roomy[Q_COLOR_PICK]["criteria"], "TypeSafe still gets them all"
+
+
+def test_the_colour_question_never_exceeds_a_tiny_cap():
+    """Below the five whites plus "none", the whites give way to what was said."""
+    extraction = extract("make it red", want_media=False, want_color=True)
+    question = _color_pick_question(extraction, max_options=3)
+    assert list(question["criteria"]) == ["red", "warm_white", NO_VALUE]
 
 
 def test_the_whole_request_fits_the_context_budget():
