@@ -668,6 +668,40 @@ async def test_reconfigure_keeps_the_profile_when_only_the_key_changes(
     assert probes == [], "no model was loaded to re-measure"
 
 
+async def test_reconfigure_to_a_new_model_drops_a_timeout_left_as_prefilled(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """A timeout pinned for the old model must not override the new measurement."""
+    await _setup_home(hass)
+    _local_server(aioclient_mock)
+    profile = ServerProfile(max_options=26, base_url=LOCAL, model="tev1")
+    entry = await _add_entry(
+        hass,
+        aioclient_mock,
+        base_url=LOCAL,
+        model="tev1",
+        server_profile=profile.as_dict(),
+        api_timeout=20.0,
+    )
+
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_BASE_URL: LOCAL, CONF_API_TIMEOUT: 20.0}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_MODEL: "nimble"}
+    )
+    result = await _through_probe(hass, result)
+    assert result["step_id"] == "tested"
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    await hass.async_block_till_done()
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data[CONF_MODEL] == "nimble"
+    assert CONF_API_TIMEOUT not in entry.data, "the new measurement applies"
+
+
 async def test_diagnostics_redact_the_server_url_everywhere(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):
@@ -686,10 +720,15 @@ async def test_diagnostics_redact_the_server_url_everywhere(
         model="nimble",
         server_profile=profile.as_dict(),
     )
+    # The server's own error message can name its host.
+    entry.runtime_data.traces.append(
+        {"route": "error", "reason": "dial tcp ollama.invalid:11434: refused"}
+    )
 
     diag = await async_get_config_entry_diagnostics(hass, entry)
 
     assert "ollama.invalid" not in json.dumps(diag)
+    assert diag["recent_requests"][-1]["reason"].startswith("dial tcp **REDACTED**")
     assert diag["client"]["server_profile"]["max_options"] == 26
 
 

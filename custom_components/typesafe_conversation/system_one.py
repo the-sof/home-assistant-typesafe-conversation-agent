@@ -277,9 +277,15 @@ class SystemOneClient:
             raise SystemOneUnavailableError(str(err)) from err
         except TimeoutError as err:
             raise SystemOneUnavailableError("Timed out reaching the server") from err
-        names = [m.get("name") for m in payload.get("models") or []]
-        names += [m.get("id") for m in payload.get("data") or []]
-        return list(dict.fromkeys(normalise_model(n) for n in names if n))
+        if not isinstance(payload, dict):
+            raise SystemOneUnavailableError("Unexpected model list from the server")
+        names = [
+            m.get("name") for m in payload.get("models") or [] if isinstance(m, dict)
+        ]
+        names += [m.get("id") for m in payload.get("data") or [] if isinstance(m, dict)]
+        return list(
+            dict.fromkeys(normalise_model(n) for n in names if isinstance(n, str) and n)
+        )
 
     async def async_decision_models(self, names: list[str]) -> list[str]:
         """Narrow a model list to decision models, where the server can say.

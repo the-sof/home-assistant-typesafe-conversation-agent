@@ -135,7 +135,7 @@ Setup tests the model before saving anything. It confirms the model is a
 decision model, finds the most options one question may offer, and times one
 request shaped like a real one from your home - then tells you how long that
 took, before you rely on it. The request timeout is set from that figure. All of
-it is cached until you change the server or model under **Configure**; after a
+it is cached until you change the server or model under **Reconfigure**; after a
 big change to what you expose to Assist, reconfigure so the timing is measured
 again. Nothing about a particular server is built in, so a new model or a new
 server needs no change to the integration.
@@ -145,7 +145,7 @@ default the integration never asks Ollama to keep one in memory and never loads
 one before it is needed. The one exception is opt-in: **Keep the model loaded**
 in the language-model settings loads that model at startup and keeps it
 resident, for when a cold load would outlast its answer timeout. Turn it off
-again under **Configure**. Ollama unloads an idle model
+again under **Reconfigure**. Ollama unloads an idle model
 after five minutes by default (`OLLAMA_KEEP_ALIVE` changes that), and the first
 request after that pays the load time; the timeout allows for it.
 
@@ -225,7 +225,10 @@ Ollama and any OpenAI-compatible endpoint (OpenRouter, vLLM, …) are supported.
 ### Options
 
 Set when you add the integration, and changeable afterwards under
-**Settings → Devices & Services → TypeSafe Conversation → Configure**.
+**Settings → Devices & Services → TypeSafe Conversation**: the server, model,
+timeout and language-model settings under **Reconfigure** in the entry's menu,
+and `always_confirm_risky`, `bypass_local_intents` and
+`inline_entity_descriptions` under each conversation agent's **Configure**.
 
 | option | default | what it does |
 | --- | --- | --- |

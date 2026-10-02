@@ -276,6 +276,25 @@ async def test_decision_models_are_filtered_where_the_server_says(mocker):
     assert await client.async_decision_models(["nimble", "qwen3"]) == ["nimble"]
 
 
+async def test_a_malformed_model_list_counts_as_unavailable(mocker):
+    """Setup then retries instead of failing on an AttributeError."""
+    session = mocker.create_session(asyncio.get_running_loop())
+    mocker.get(LOCAL + "/v1/models", json=["nimble"])
+    client = SystemOneClient(session, None, "nimble", base_url=LOCAL)
+    with pytest.raises(SystemOneUnavailableError):
+        await client.async_validate()
+
+
+async def test_junk_entries_in_the_model_list_are_skipped(mocker):
+    session = mocker.create_session(asyncio.get_running_loop())
+    mocker.get(
+        LOCAL + "/v1/models",
+        json={"data": ["nimble", {"id": 3}, {"id": ""}, {"id": "tev1:4b"}]},
+    )
+    client = SystemOneClient(session, None, "nimble", base_url=LOCAL)
+    assert await client.async_validate() == ["tev1:4b"]
+
+
 async def test_without_api_show_the_model_list_is_kept_whole(client, mocker):
     mocker.post("https://api.typesafe.ai/api/show", status=404)
     names = ["jev-latest", "jev-1.13.0"]

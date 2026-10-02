@@ -159,6 +159,7 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
         self._probe_task: asyncio.Task[ServerProfile] | None = None
         self._probe_error: str | None = None
         self._reconfiguring = False
+        self._timeout_prefill: float | None = None
 
     def _client(self, model: str | None = None) -> SystemOneClient:
         return SystemOneClient(
@@ -221,6 +222,12 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
             ):
                 # Same server, same model: what the probe measured still holds.
                 return await self.async_step_llm()
+            if (timeout := self._data.get(CONF_API_TIMEOUT)) is not None and float(
+                timeout
+            ) == self._timeout_prefill:
+                # A timeout pinned for the old server or model and left as
+                # prefilled would override the new measurement, so drop it.
+                self._data.pop(CONF_API_TIMEOUT)
             return await self.async_step_probe()
         if self._probe_error is not None:
             errors["base"] = "model_rejected"
@@ -417,6 +424,7 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_BASE_URL: normalise_base_url(entry.data.get(CONF_BASE_URL)),
             CONF_API_TIMEOUT: entry.data.get(CONF_API_TIMEOUT, profile.timeout),
         }
+        self._timeout_prefill = float(defaults[CONF_API_TIMEOUT])
         errors: dict[str, str] = {}
         if user_input is not None:
             self._data = {

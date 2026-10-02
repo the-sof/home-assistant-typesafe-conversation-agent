@@ -25,7 +25,7 @@
           "llm_keep_loaded": "Keep the model loaded (Ollama)"
         },
         "data_description": {
-          "llm_keep_loaded": "Off by default: the server decides when to unload an idle model, so the first question after a pause waits for it to load. Turn this on to load it at startup and keep it in memory, which makes that first answer fast but holds the memory for as long as Home Assistant runs. Change it any time under Configure. Has no effect on hosted backends.",
+          "llm_keep_loaded": "Off by default: the server decides when to unload an idle model, so the first question after a pause waits for it to load. Turn this on to load it at startup and keep it in memory, which makes that first answer fast but holds the memory for as long as Home Assistant runs. Change it any time under Reconfigure. Has no effect on hosted backends.",
           "llm_timeout": "How long to wait for an answer. A large local model that has to load first may need more than the default."
         }
       },
@@ -57,7 +57,7 @@
       },
       "tested": {
         "title": "Server tested",
-        "description": "{model} answered a typical request from this home in {typical} s, and took {cold} s when it first had to load. Requests will time out after {timeout} s; you can change that under Configure.\n\nThe integration never keeps the model loaded. If your server unloads it when idle, the next request takes about {cold} s longer.\n\nA voice assistant starts to feel slow above about 2 seconds. If this is too slow, a smaller model, faster hardware or TypeSafe's hosted API will do better."
+        "description": "{model} answered a typical request from this home in {typical} s, and took {cold} s when it first had to load. Requests will time out after {timeout} s; you can change that under Reconfigure.\n\nThe integration never asks the server to keep this decision model loaded. If your server unloads it when idle, the next request takes about {cold} s longer.\n\nA voice assistant starts to feel slow above about 2 seconds. If this is too slow, a smaller model, faster hardware or TypeSafe's hosted API will do better."
       }
     },
     "error": {
