@@ -28,9 +28,9 @@ from .const import (
     ANSWER_TIMEOUT,
     BACKEND_OLLAMA,
     BACKEND_OPENAI_COMPAT,
+    LLM_KEEP_ALIVE,
     LOGGER,
     MAX_SUB_COMMANDS,
-    OLLAMA_KEEP_ALIVE,
     PROMPT_LOG_CHARS,
     SPLIT_MAX_TOKENS,
     SPLIT_TIMEOUT,
@@ -110,6 +110,9 @@ class LLMBackend(ABC):
         self._api_key = api_key
         self._answer_timeout = answer_timeout
 
+    async def async_warm_up(self) -> None:  # noqa: B027 - optional hook
+        """Load the model ahead of need. Only Ollama does anything with this."""
+
     @abstractmethod
     async def _chat(
         self,
@@ -130,10 +133,6 @@ class LLMBackend(ABC):
         waits, and it is the only figure that also covers connection setup
         and a slow link.
         """
-
-    # An optional hook, no-op by default - deliberately not abstract.
-    async def async_warm_up(self) -> None:  # noqa: B027
-        """Nudge the model into memory. Overridden where it helps."""
 
     async def split_compound(self, utterance: str) -> list[str]:
         """Break a compound request into atomic commands.
@@ -212,6 +211,11 @@ class OllamaBackend(LLMBackend):
 
     name = BACKEND_OLLAMA
 
+    keep_loaded = False
+    """Opt-in. When set, every request asks Ollama to keep the model loaded, and
+    the integration loads it at startup and pings it to keep it resident. Off by
+    default: whether a model sits in memory is the server owner's call."""
+
     async def _chat(
         self,
         messages: list[dict[str, str]],
@@ -220,13 +224,15 @@ class OllamaBackend(LLMBackend):
         temperature: float,
         timeout: float,
     ) -> tuple[str, dict[str, Any]]:
-        payload = {
+        payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "stream": False,
-            "keep_alive": OLLAMA_KEEP_ALIVE,
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
+        if self.keep_loaded:
+            # Only on request. Otherwise the server's own idle setting decides.
+            payload["keep_alive"] = LLM_KEEP_ALIVE
         headers = {}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -242,17 +248,19 @@ class OllamaBackend(LLMBackend):
         return text, _ollama_metrics(data, elapsed)
 
     async def async_warm_up(self) -> None:
-        """Keep the model resident.
+        """Load the model before it is needed, for users who opted in.
 
-        A cold 7B load is several seconds and would be blamed on this
-        integration, so we pay for it in the background instead.
+        A cold load of a large model can outlast the answer timeout, so paying
+        for it in the background keeps the first general question fast.
         """
+        if not self.keep_loaded:
+            return
         try:
             _text, metrics = await self._chat(
                 [{"role": "user", "content": "hi"}],
                 max_tokens=1,
                 temperature=0.0,
-                timeout=SPLIT_TIMEOUT,
+                timeout=max(self._answer_timeout, 120.0),
             )
             LOGGER.debug(
                 "Ollama warm-up took %.2fs (load %.2fs)",
@@ -260,7 +268,7 @@ class OllamaBackend(LLMBackend):
                 metrics.get("load_s", 0.0),
             )
         except LLMBackendError as err:
-            LOGGER.debug("Ollama warm-up did not succeed: %s", err)
+            LOGGER.debug("Ollama warm-up failed: %s", err)
 
 
 class OpenAICompatBackend(LLMBackend):
@@ -496,6 +504,7 @@ def create_backend(
         CONF_LLM_API_KEY,
         CONF_LLM_BACKEND,
         CONF_LLM_BASE_URL,
+        CONF_LLM_KEEP_LOADED,
         CONF_LLM_MODEL,
         CONF_LLM_REFERER,
         CONF_LLM_TIMEOUT,
@@ -513,9 +522,11 @@ def create_backend(
     timeout = float(settings.get(CONF_LLM_TIMEOUT) or ANSWER_TIMEOUT)
 
     if backend == BACKEND_OLLAMA:
-        return OllamaBackend(
+        ollama = OllamaBackend(
             session, base_url, model, settings.get(CONF_LLM_API_KEY), timeout
         )
+        ollama.keep_loaded = bool(settings.get(CONF_LLM_KEEP_LOADED))
+        return ollama
     if backend == BACKEND_OPENAI_COMPAT:
         return OpenAICompatBackend(
             session,

@@ -2,36 +2,76 @@
   "config": {
     "step": {
       "user": {
-        "title": "TypeSafe credentials",
-        "description": "Create an API key at {console_url}",
+        "title": "System One server",
+        "description": "Any server that speaks TypeSafe's System One API works. Keep the default to use TypeSafe's hosted models, with an API key from {console_url}. Or point it at a local server such as Ollama, which usually needs no key.",
         "data": {
-          "api_key": "TypeSafe API key",
-          "model": "Model"
+          "base_url": "Server URL",
+          "api_key": "API key"
+        },
+        "data_description": {
+          "base_url": "For Ollama, the address of the machine running it, on port 11434.",
+          "api_key": "Leave blank for a server that doesn't check one."
         }
       },
       "llm": {
         "title": "Language model (optional)",
-        "description": "Jev decides every command and query on its own. A language model is only used to split requests that contain several commands, and to answer general questions. Leave this blank to skip it.",
+        "description": "The decision model handles every command and query on its own. A language model is only used to split requests that contain several commands, and to answer general questions. Leave this blank to skip it.",
         "data": {
           "llm_backend": "Backend",
           "llm_base_url": "Base URL",
           "llm_model": "Model",
           "llm_api_key": "API key",
-          "llm_timeout": "Answer timeout"
+          "llm_timeout": "Answer timeout",
+          "llm_keep_loaded": "Keep the model loaded (Ollama)"
+        },
+        "data_description": {
+          "llm_keep_loaded": "Off by default: the server decides when to unload an idle model, so the first question after a pause waits for it to load. Turn this on to load it at startup and keep it in memory, which makes that first answer fast but holds the memory for as long as Home Assistant runs. Change it any time under Configure. Has no effect on hosted backends.",
+          "llm_timeout": "How long to wait for an answer. A large local model that has to load first may need more than the default."
         }
       },
       "reauth_confirm": {
-        "title": "Re-enter your TypeSafe API key",
-        "data": { "api_key": "TypeSafe API key" }
+        "title": "Re-enter your API key",
+        "data": {
+          "api_key": "API key"
+        }
+      },
+      "model": {
+        "title": "Decision model",
+        "description": "The decision models this server offers. You can also type a model's name.",
+        "data": {
+          "model": "Model"
+        }
+      },
+      "reconfigure": {
+        "title": "System One server",
+        "description": "Change the server, key or request timeout. A new server or model is tested again; changing only the key or timeout is not. The language model settings follow. TypeSafe API keys come from {console_url}.",
+        "data": {
+          "base_url": "Server URL",
+          "api_key": "API key",
+          "api_timeout": "Request timeout"
+        },
+        "data_description": {
+          "api_key": "Leave blank for a server that doesn't check one.",
+          "api_timeout": "How long to wait for an answer. Set from the measured cold-load time; raise it for a slow local model."
+        }
+      },
+      "tested": {
+        "title": "Server tested",
+        "description": "{model} answered a typical request from this home in {typical} s, and took {cold} s when it first had to load. Requests will time out after {timeout} s; you can change that under Configure.\n\nThe integration never keeps the model loaded. If your server unloads it when idle, the next request takes about {cold} s longer.\n\nA voice assistant starts to feel slow above about 2 seconds. If this is too slow, a smaller model, faster hardware or TypeSafe's hosted API will do better."
       }
     },
     "error": {
       "invalid_auth": "That API key was rejected.",
-      "cannot_connect": "Could not reach the TypeSafe API.",
+      "cannot_connect": "Could not reach the server at that address.",
+      "model_rejected": "The server can't use this model: {reason}",
       "unknown": "Unexpected error."
     },
     "abort": {
-      "reauth_successful": "Re-authentication was successful."
+      "reauth_successful": "Re-authentication was successful.",
+      "reconfigure_successful": "The server settings were updated."
+    },
+    "progress": {
+      "probe": "Testing {model}: finding what the server accepts, then timing one request shaped like a real one from this home. On a server without a fast GPU that can take a few minutes."
     }
   },
   "config_subentries": {

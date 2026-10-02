@@ -92,7 +92,8 @@ Assistant configuration. They are never asked of the model.
 
 ## What gets sent
 
-On every request this integration sends, to `https://api.typesafe.ai/v1/systemone`:
+On every request this integration sends, to the System One server you configured
+(TypeSafe's hosted `https://api.typesafe.ai` by default):
 
 - the text of the utterance
 - **every entity you have exposed to Assist** — its name, area, floor, domain,
@@ -101,20 +102,82 @@ On every request this integration sends, to `https://api.typesafe.ai/v1/systemon
 
 That is the whole point of the design: the model is given the home as state and
 answers questions about it, rather than being asked to write code or call tools.
-But it means your device and room names, and what is currently on or off, leave
-your network. If that is not acceptable to you, this integration is not the
-right choice, and a fully local LLM agent is.
+With TypeSafe's hosted API, that means your device and room names, and what is
+currently on or off, leave your network. If that is not acceptable, run a
+decision model locally instead - see [Running locally](#running-locally) - and
+nothing leaves the house.
 
 What does **not** happen: nothing is stored by this project, there is no
 telemetry of its own, and the optional LLM backend is configured separately —
 point it at Ollama on your own machine and the prose path never leaves the
-house either. Diagnostics downloads redact the API key, the LLM base URL and
+house either. Diagnostics downloads redact the API key, both server URLs and
 your entity IDs.
 
-TypeSafe's own handling of what you send is governed by their
-[terms](https://typesafe.ai/legal/mca) and
+When you use TypeSafe's hosted API, its handling of what you send is governed by
+their [terms](https://typesafe.ai/legal/mca) and
 [data processing agreement](https://typesafe.ai/data-processing), not by this
 project.
+
+## Running locally
+
+Any server that speaks TypeSafe's System One API works, not only TypeSafe's own.
+Ollama does from version 0.35, with local decision models such as `nimble`
+(9B, Bespoke Labs) and `tev1` (4B and 0.8B, Together AI):
+
+```sh
+ollama pull nimble
+```
+
+Then add the integration with Ollama's address as the server URL, for example
+`http://<ollama-host>:11434`, and no API key.
+
+Setup tests the model before saving anything. It confirms the model is a
+decision model, finds the most options one question may offer, and times one
+request shaped like a real one from your home - then tells you how long that
+took, before you rely on it. The request timeout is set from that figure. All of
+it is cached until you change the server or model under **Configure**; after a
+big change to what you expose to Assist, reconfigure so the timing is measured
+again. Nothing about a particular server is built in, so a new model or a new
+server needs no change to the integration.
+
+How long a model stays loaded between requests is left to the server. By
+default the integration never asks Ollama to keep one in memory and never loads
+one before it is needed. The one exception is opt-in: **Keep the model loaded**
+in the language-model settings loads that model at startup and keeps it
+resident, for when a cold load would outlast its answer timeout. Turn it off
+again under **Configure**. Ollama unloads an idle model
+after five minutes by default (`OLLAMA_KEEP_ALIVE` changes that), and the first
+request after that pays the load time; the timeout allows for it.
+
+Three things are worth knowing before you rely on it:
+
+- **Expect it to be slow for now.** A local model scores every question against
+  your whole home, so one request is far more work than the answer suggests:
+  tens of seconds even on a recent GPU, and minutes on a CPU-only machine. That
+  is too slow for voice. The setup screen shows the figure for your own server.
+- **The context window is set on the server.** Ollama loads each model with a
+  default context (`nimble` 8,194 tokens, `tev1` 2,050), and a request that does
+  not fit is rejected, never truncated. If diagnostics show "prompt has N
+  tokens; expected 1–M", raise it with a Modelfile:
+
+  ```
+  FROM tev1:4b
+  PARAMETER num_ctx 16384
+  ```
+
+  then `ollama create tev1-16k -f Modelfile`, and choose `tev1-16k`.
+- **Thresholds were fitted to Jev.** Every routing threshold in `const.py` comes
+  from `jev-1.13.0`'s answers. Another model's probabilities are shaped
+  differently, so it may ask "did you mean…?" too often or act too readily until
+  they are re-fitted with `scripts/calibrate.py --base-url`.
+
+Local servers also accept fewer options per question - Ollama allows 26 - so a
+home with more exposed entities than that picks its device in two requests: the
+first narrows to the likeliest kind of device and room, the second chooses among
+just those. That follows TypeSafe's
+[hierarchical classification](https://docs.typesafe.ai/cookbooks/hierarchical_classification.md)
+pattern. If no room was said and one kind of device alone is too many to offer,
+the agent asks which room.
 
 ## Cost
 
@@ -166,8 +229,10 @@ Set when you add the integration, and changeable afterwards under
 
 | option | default | what it does |
 | --- | --- | --- |
-| `api_key` | — | Your TypeSafe API key. Required. |
-| `model` | `jev-latest` | Which System One model to use. Tracks the newest Jev unless you pin one. |
+| `base_url` | `https://api.typesafe.ai` | The System One server. Any compatible server works; see [Running locally](#running-locally). |
+| `api_key` | — | Required by TypeSafe's hosted API. Leave blank for a server that doesn't check one, such as Ollama. |
+| `model` | `jev-latest` | Which decision model to use, chosen from what the server offers. On TypeSafe, `jev-latest` tracks the newest Jev. |
+| `api_timeout` | measured | How long to wait for an answer. Set at setup from a timed, real-sized request plus the cold-load time, never below 6 s. |
 | `always_confirm_risky` | **on** | Ask before unlocking a door, opening a garage or disarming an alarm, however sure the model is. **Turning this off lets confident requests through silently** — the model's judgement becomes the only gate. |
 | `bypass_local_intents` | off | Send every command here, including ones Home Assistant's own sentence matcher recognises. Off is recommended; see [below](#leave-prefer-handling-commands-locally-on). |
 | `inline_entity_descriptions` | off | Describe every entity inside each question rather than once in the shared state. Roughly doubles the tokens. Only worth it if the agent picks the wrong device. |
@@ -175,7 +240,8 @@ Set when you add the integration, and changeable afterwards under
 | `llm_base_url` | `http://localhost:11434` (Ollama) | Where that backend lives. Point it at your own machine to keep the prose path local. |
 | `llm_model` | — | Model name on that backend. |
 | `llm_api_key` | — | If the backend needs one. Redacted in diagnostics. |
-| `llm_timeout` | `30` s | How long to wait for the LLM before giving up. Only the prose path is affected. |
+| `llm_timeout` | `30` s | How long to wait for the LLM before giving up. Only the prose path is affected. A large local model that must load first may need more. |
+| `llm_keep_loaded` | off | Ollama only. Load the language model at startup and keep it in memory, so the first general question after a pause is fast. Holds the memory while Home Assistant runs; off leaves unloading to the server. |
 | `llm_referer`, `llm_title` | project defaults | Sent as `HTTP-Referer` and `X-Title`; OpenRouter uses them for attribution. |
 
 ### Leave "prefer handling commands locally" on

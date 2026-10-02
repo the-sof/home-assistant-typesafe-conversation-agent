@@ -92,7 +92,7 @@ async def test_ollama_request_shape(session, mocker):
     await backend.split_compound("x")
     body = mocker.mock_calls[0][2]
     assert body["stream"] is False, "streaming would only add latency here"
-    assert body["keep_alive"] == "30m"
+    assert "keep_alive" not in body, "how long it stays loaded is the server's call"
     assert body["options"]["temperature"] == 0.0
 
 
@@ -284,3 +284,25 @@ async def test_the_home_catalog_is_truncated_out_of_the_log(session, mocker):
     # The catalog appears at most once, inside the truncated head.
     assert logged.count(secret) <= 1
     assert len(home_state) > PROMPT_LOG_CHARS
+
+
+async def test_keep_alive_is_sent_only_when_opted_in(session, mocker):
+    """Off by default - the server's idle setting decides - on only on request."""
+    mocker.post("http://ollama:11434/api/chat", json=_ollama("[]"))
+    backend = OllamaBackend(session, "http://ollama:11434", "qwen")
+    await backend.split_compound("x")
+    backend.keep_loaded = True
+    await backend.split_compound("y")
+    first, second = (call[2] for call in mocker.mock_calls)
+    assert "keep_alive" not in first
+    assert second["keep_alive"] == "30m"
+
+
+async def test_warm_up_does_nothing_unless_opted_in(session, mocker):
+    mocker.post("http://ollama:11434/api/chat", json=_ollama("ok"))
+    backend = OllamaBackend(session, "http://ollama:11434", "qwen")
+    await backend.async_warm_up()
+    assert mocker.mock_calls == []
+    backend.keep_loaded = True
+    await backend.async_warm_up()
+    assert len(mocker.mock_calls) == 1

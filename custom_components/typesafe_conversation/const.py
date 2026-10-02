@@ -24,14 +24,35 @@ integration can silently become our own domain instead."""
 LOGGER: Final = logging.getLogger(__package__)
 
 # --- TypeSafe System One ------------------------------------------------------
-TYPESAFE_API_URL: Final = "https://api.typesafe.ai/v1/systemone"
-TYPESAFE_MODELS_URL: Final = "https://api.typesafe.ai/v1/models"
+DEFAULT_BASE_URL: Final = "https://api.typesafe.ai"
+"""Any server speaking the System One API works; this is TypeSafe's hosted one."""
+SYSTEM_ONE_PATH: Final = "/v1/systemone"
+MODELS_PATH: Final = "/v1/models"
+TYPESAFE_API_URL: Final = DEFAULT_BASE_URL + SYSTEM_ONE_PATH
+TYPESAFE_MODELS_URL: Final = DEFAULT_BASE_URL + MODELS_PATH
 TYPESAFE_CONSOLE_URL: Final = "https://console.typesafe.ai/"
 DEFAULT_MODEL: Final = "jev-latest"
 """Jev is the only System One model today. An alias, so it follows releases."""
 API_TIMEOUT: Final = 6.0
 API_MAX_RETRIES: Final = 3
 API_BACKOFF: Final = (0.25, 0.75, 2.0)
+
+# --- Endpoint discovery -------------------------------------------------------
+# The System One API does not report its limits, so they are probed once at
+# setup and cached on the entry. A probe that breaks a limit is rejected before
+# the server loads the model, so finding a cap costs milliseconds, not loads.
+PROBE_MAX_OPTIONS: Final = 255
+"""The most options worth asking for. TypeSafe accepts this many."""
+PROBE_TIMEOUT: Final = 180.0
+"""A probe may have to wait for a cold model load."""
+MEASURE_TIMEOUT: Final = 600.0
+"""The timed, real-sized request at setup. A CPU-only server can take minutes."""
+MEASURE_UTTERANCE: Final = "what time is it"
+"""Asked once at setup to time a request shaped like a real one. Never acted on."""
+TIMEOUT_MARGIN: Final = 1.5
+"""Default request timeout: this many times (cold load + a typical request)."""
+BEAM_WIDTH: Final = 2
+"""Domain/area paths kept when a home is too large for one entity question."""
 
 # Circuit breaker: after this many consecutive failures, stop calling the API for
 # CIRCUIT_RESET_SECONDS and serve the fallback ladder instead.
@@ -41,6 +62,9 @@ CIRCUIT_RESET_SECONDS: Final = 60.0
 # --- Config keys -------------------------------------------------------------
 CONF_API_KEY: Final = "api_key"
 CONF_MODEL: Final = "model"
+CONF_BASE_URL: Final = "base_url"
+CONF_API_TIMEOUT: Final = "api_timeout"
+CONF_SERVER_PROFILE: Final = "server_profile"
 CONF_LLM_BACKEND: Final = "llm_backend"
 CONF_LLM_BASE_URL: Final = "llm_base_url"
 CONF_LLM_MODEL: Final = "llm_model"
@@ -51,6 +75,7 @@ CONF_BYPASS_LOCAL_INTENTS: Final = "bypass_local_intents"
 CONF_INLINE_ENTITY_DESCRIPTIONS: Final = "inline_entity_descriptions"
 CONF_ALWAYS_CONFIRM_RISKY: Final = "always_confirm_risky"
 CONF_LLM_TIMEOUT: Final = "llm_timeout"
+CONF_LLM_KEEP_LOADED: Final = "llm_keep_loaded"
 
 DEFAULT_ALWAYS_CONFIRM_RISKY: Final = True
 """Ask before unlocking or opening the house, however sure the model is.
@@ -71,6 +96,10 @@ DEFAULT_LLM_TITLE: Final = "HA TypeSafe Conversation"
 
 # --- LLM behaviour -----------------------------------------------------------
 SPLIT_TIMEOUT: Final = 4.0
+LLM_KEEP_ALIVE: Final = "30m"
+LLM_WARMUP_INTERVAL_SECONDS: Final = 20 * 60
+"""Only for users who opt in to keeping the Ollama model loaded. By default the
+integration never asks a server to keep a model in memory."""
 ANSWER_TIMEOUT: Final = 30.0
 """Seconds to wait for a freeform answer.
 
@@ -82,8 +111,6 @@ SPLIT_MAX_TOKENS: Final = 200
 ANSWER_MAX_TOKENS: Final = 180
 ANSWER_TEMPERATURE: Final = 0.3
 MAX_SUB_COMMANDS: Final = 6
-OLLAMA_KEEP_ALIVE: Final = "30m"
-WARMUP_INTERVAL_SECONDS: Final = 20 * 60
 
 PROMPT_LOG_CHARS: Final = 200
 """How much of a system prompt to write to the debug log.
@@ -92,8 +119,11 @@ The freeform prompt embeds the home catalog - entity names, areas and current
 states - and home-assistant.log is what gets pasted into issue reports."""
 
 # --- Catalog -----------------------------------------------------------------
-# The binding constraint is the API's 255-option cap on a Choice, not tokens.
-MAX_CHOICE_OPTIONS: Final = 250
+MAX_CHOICE_OPTIONS: Final = 255
+"""Options per Choice for entries set up before endpoint discovery existed.
+
+Those entries all point at TypeSafe, which accepts 255. Newer entries use the
+cap discovered for their own server instead."""
 MAX_HISTORY_TURNS: Final = 2
 CATALOG_SUMMARY_MAX_ENTITIES: Final = 120
 TRACE_HISTORY: Final = 20

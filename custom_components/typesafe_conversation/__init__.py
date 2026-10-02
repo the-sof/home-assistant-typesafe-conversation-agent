@@ -9,7 +9,7 @@ reaches an LLM.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -23,16 +23,25 @@ from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
     CONF_API_KEY,
+    CONF_API_TIMEOUT,
+    CONF_BASE_URL,
+    CONF_LLM_KEEP_LOADED,
     CONF_MODEL,
+    CONF_SERVER_PROFILE,
     CONVERSATION_DOMAIN,
     DEFAULT_MODEL,
     DOMAIN,
+    LLM_WARMUP_INTERVAL_SECONDS,
     TRACE_HISTORY,
-    WARMUP_INTERVAL_SECONDS,
 )
 from .entities import EntityCatalog
 from .llm_backend import LLMBackend, create_backend
-from .system_one import SystemOneAuthError, SystemOneClient, SystemOneError
+from .system_one import (
+    ServerProfile,
+    SystemOneAuthError,
+    SystemOneClient,
+    SystemOneError,
+)
 
 PLATFORMS = [Platform.CONVERSATION]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -67,8 +76,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: TypeSafeConfigEntry) -> 
     session = async_get_clientsession(hass)
     client = SystemOneClient(
         session,
-        entry.data[CONF_API_KEY],
+        entry.data.get(CONF_API_KEY),
         entry.data.get(CONF_MODEL, DEFAULT_MODEL),
+        base_url=entry.data.get(CONF_BASE_URL),
+        profile=_profile(entry),
     )
 
     try:
@@ -76,7 +87,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: TypeSafeConfigEntry) -> 
     except SystemOneAuthError as err:
         raise ConfigEntryAuthFailed(str(err)) from err
     except SystemOneError as err:
-        raise ConfigEntryNotReady(f"Could not reach TypeSafe: {err}") from err
+        raise ConfigEntryNotReady(
+            f"Could not reach the System One server: {err}"
+        ) from err
 
     store = hass.data.setdefault(DOMAIN, {})
     catalog: EntityCatalog | None = store.get("catalog")
@@ -95,35 +108,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: TypeSafeConfigEntry) -> 
         model=entry.data.get(CONF_MODEL, DEFAULT_MODEL),
     )
 
-    if llm is not None:
-        # A cold model load is seconds long and would be blamed on us, so pay
-        # for it in the background and keep paying every 20 minutes.
+    if llm is not None and entry.data.get(CONF_LLM_KEEP_LOADED):
+        # Opt-in only. Load the model in the background now, and ping it often
+        # enough that the server never unloads it while this entry is set up.
         entry.async_create_background_task(
             hass, llm.async_warm_up(), "typesafe_llm_warmup", eager_start=False
         )
 
-        async def _async_warm_up(_now: datetime) -> None:
-            """Keep the model resident.
-
-            This must be a coroutine function. async_track_time_interval
-            classifies its action as a HassJob, and a plain sync callable is
-            run in an executor thread - from which hass.async_create_task is
-            not safe to call.
-            """
+        async def _async_keep_loaded(_now: datetime) -> None:
+            """A coroutine function on purpose: async_track_time_interval runs a
+            plain sync callable in an executor thread, where
+            hass.async_create_task is not safe to call."""
             await llm.async_warm_up()
 
         entry.async_on_unload(
             async_track_time_interval(
                 hass,
-                _async_warm_up,
-                timedelta(seconds=WARMUP_INTERVAL_SECONDS),
-                name="typesafe_llm_warmup",
+                _async_keep_loaded,
+                timedelta(seconds=LLM_WARMUP_INTERVAL_SECONDS),
+                name="typesafe_llm_keep_loaded",
             )
         )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
+
+
+def _profile(entry: ConfigEntry) -> ServerProfile:
+    """The probed profile, with any timeout the user set in its place.
+
+    Entries made before endpoint discovery have no profile and get the defaults,
+    which describe TypeSafe's API - the only server they could point at.
+    """
+    profile = ServerProfile.from_dict(entry.data.get(CONF_SERVER_PROFILE))
+    if (timeout := entry.data.get(CONF_API_TIMEOUT)) is not None:
+        profile = replace(profile, timeout=float(timeout))
+    return profile
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: TypeSafeConfigEntry) -> bool:

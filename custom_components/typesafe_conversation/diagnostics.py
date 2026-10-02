@@ -17,13 +17,23 @@ from homeassistant.core import HomeAssistant
 from . import TypeSafeConfigEntry
 from .const import (
     CONF_API_KEY,
+    CONF_BASE_URL,
     CONF_LLM_API_KEY,
     CONF_LLM_BASE_URL,
 )
 
-# The base URL is redacted too: for a self-hosted model it is usually a private
-# hostname, and diagnostics get pasted into public issue threads.
-REDACT = {CONF_API_KEY, CONF_LLM_API_KEY, CONF_LLM_BASE_URL, "api_key", "token"}
+# Base URLs are redacted too - the System One server's and the LLM's: a
+# self-hosted one is usually a private hostname, and diagnostics get pasted into
+# public issue threads. Redaction matches keys at any depth, so this also covers
+# the URL recorded inside the cached server profile.
+REDACT = {
+    CONF_API_KEY,
+    CONF_BASE_URL,
+    CONF_LLM_API_KEY,
+    CONF_LLM_BASE_URL,
+    "api_key",
+    "token",
+}
 
 
 async def async_get_config_entry_diagnostics(
@@ -47,6 +57,10 @@ async def async_get_config_entry_diagnostics(
         "llm_backend": data.llm.name if data.llm else None,
         "client": {
             "circuit_open": data.client.circuit_open,
+            # What discovery measured: the option cap, timeout, cold-load time
+            # and context window. Usually the first thing to check when a local
+            # model misbehaves.
+            "server_profile": async_redact_data(data.client.profile.as_dict(), REDACT),
         },
         "catalog": {
             "generation": catalog.generation,
