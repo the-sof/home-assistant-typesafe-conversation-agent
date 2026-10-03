@@ -378,3 +378,14 @@ async def test_a_malformed_answer_counts_against_the_breaker(client, mocker):
     assert mocker.call_count == 1, "the same request would fail the same way"
     assert client._consecutive_failures == 1
 
+
+async def test_a_redirect_is_refused_with_a_hint(client, mocker):
+    """Following it would resend the key; usually http:// should be https://."""
+    mocker.post(
+        "https://api.typesafe.ai/v1/systemone",
+        status=301,
+        headers={"Location": "https://elsewhere.invalid/v1/systemone"},
+    )
+    with pytest.raises(SystemOneRequestError, match="https://"):
+        await client.async_ask("state", {"q": {}})
+    assert mocker.call_count == 1

@@ -304,8 +304,10 @@ class SystemOneClient:
             async with self._session.get(
                 self._base + MODELS_PATH,
                 headers=self._headers(),
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=API_TIMEOUT),
             ) as response:
+                _refuse_redirect(response)
                 if response.status in (401, 403):
                     raise SystemOneAuthError("The API key was rejected")
                 response.raise_for_status()
@@ -407,8 +409,10 @@ class SystemOneClient:
                 self._base + SYSTEM_ONE_PATH,
                 json=body,
                 headers=self._headers(),
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=MEASURE_TIMEOUT),
             ) as response:
+                _refuse_redirect(response)
                 if response.status != 200:
                     raise _probe_failure(response.status, await _error_detail(response))
         except SystemOneError:
@@ -439,8 +443,10 @@ class SystemOneClient:
                 self._base + SYSTEM_ONE_PATH,
                 json=body,
                 headers=self._headers(),
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=PROBE_TIMEOUT),
             ) as response:
+                _refuse_redirect(response)
                 detail = "" if response.status == 200 else await _error_detail(response)
                 return response.status, time.monotonic() - started, detail
         except aiohttp.ClientError as err:
@@ -457,6 +463,7 @@ class SystemOneClient:
                 self._base + "/api/show",
                 json={"model": model},
                 headers=self._headers(),
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=API_TIMEOUT),
             ) as response:
                 if response.status != 200:
@@ -547,8 +554,10 @@ class SystemOneClient:
                 self._base + SYSTEM_ONE_PATH,
                 json=body,
                 headers=self._headers(),
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=self.profile.timeout),
             ) as response:
+                _refuse_redirect(response)
                 if response.status in (401, 403):
                     raise SystemOneAuthError("The API key was rejected")
                 if response.status in _REJECTED or response.status == 404:
@@ -625,6 +634,19 @@ async def _error_detail(response: aiohttp.ClientResponse) -> str:
                 break
     status = f"HTTP {response.status}"
     return f"{text[:300]} ({status})" if text else status
+
+
+def _refuse_redirect(response: aiohttp.ClientResponse) -> None:
+    """Never follow a redirect with the API key attached.
+
+    The commonest cause is an ``http://`` URL for a server that only answers on
+    ``https://``, so say that rather than failing obscurely.
+    """
+    if 300 <= response.status < 400:
+        raise SystemOneRequestError(
+            f"The server redirected the request (HTTP {response.status}). "
+            "Check the server URL, for example http:// against https://."
+        )
 
 
 def _probe_failure(status: int, detail: str) -> SystemOneError:

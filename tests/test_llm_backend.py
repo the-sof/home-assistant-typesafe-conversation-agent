@@ -305,3 +305,46 @@ async def test_warm_up_does_nothing_unless_opted_in(session, mocker):
     backend.keep_loaded = True
     await backend.async_warm_up()
     assert len(mocker.mock_calls) == 1
+
+
+async def _failed_answer(session, mocker, **response) -> LLMBackendError:
+    backend = OpenAICompatBackend(session, "https://x.invalid", "m", api_key="k")
+    mocker.post("https://x.invalid/v1/chat/completions", **response)
+    with pytest.raises(LLMBackendError) as caught:
+        await backend.answer_freeform(
+            "hi",
+            [],
+            home_state="",
+            local_time="10:00",
+            weekday="Monday",
+            speaker_area=None,
+        )
+    return caught.value
+
+
+async def test_an_error_body_stays_out_of_the_error(session, mocker):
+    """A server can echo the prompt back, and the prompt holds the home state."""
+    err = await _failed_answer(
+        session, mocker, status=500, text="echo: the front door is unlocked"
+    )
+    assert str(err) == "HTTP 500"
+
+
+async def test_an_unexpected_shape_is_not_dumped_into_the_error(session, mocker):
+    err = await _failed_answer(session, mocker, json={"secret": "home state"})
+    assert "home state" not in str(err)
+
+
+async def test_a_redirect_is_refused_not_followed(session, mocker):
+    err = await _failed_answer(
+        session, mocker, status=301, headers={"Location": "https://elsewhere"}
+    )
+    assert "redirected" in str(err)
+
+
+def test_the_answer_follows_the_users_language():
+    from custom_components.typesafe_conversation.llm_backend import (
+        ANSWER_SYSTEM_PROMPT,
+    )
+
+    assert "language the user spoke in" in ANSWER_SYSTEM_PROMPT
