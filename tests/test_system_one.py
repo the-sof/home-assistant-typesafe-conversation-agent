@@ -404,3 +404,22 @@ async def test_a_response_that_is_not_an_object_counts_as_a_failure(client, mock
         await client.async_ask("state", {"q": {}})
     assert client._consecutive_failures == 1
 
+
+@pytest.mark.parametrize(
+    ("url", "key", "leaks"),
+    [
+        ("http://api.example.com", "sk", True),
+        ("http://8.8.8.8:8080", "sk", True),
+        ("https://api.example.com", "sk", False),
+        ("http://api.example.com", None, False),
+        ("http://localhost:11434", "sk", False),
+        ("http://ollama:11434", "sk", False),
+        ("http://box.local:11434", "sk", False),
+        ("http://192.168.1.20:11434", "sk", False),
+        ("http://[::1]:11434", "sk", False),
+    ],
+)
+def test_a_key_is_only_refused_where_it_would_cross_the_internet(url, key, leaks):
+    from custom_components.typesafe_conversation.system_one import key_would_leak
+
+    assert key_would_leak(url, key) is leaks

@@ -13,12 +13,14 @@ aiohttp session HA already manages keeps the integration dependency-free.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import math
 import re
 import time
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -187,6 +189,28 @@ class ServerProfile:
 
 def normalise_base_url(url: str | None) -> str:
     return (url or DEFAULT_BASE_URL).strip().rstrip("/")
+
+
+def key_would_leak(base_url: str | None, api_key: str | None) -> bool:
+    """True when a key would cross a network that is not ours in cleartext.
+
+    Plain http:// is normal for a server on the local network, and Ollama asks
+    for no key at all. A key sent to anything else over http:// can be read
+    on the way, so the setup form refuses that combination.
+    """
+    if not api_key:
+        return False
+    parts = urlsplit(normalise_base_url(base_url))
+    if parts.scheme != "http":
+        return False
+    host = (parts.hostname or "").lower()
+    if host == "localhost" or host.endswith(".local") or "." not in host:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return not (address.is_private or address.is_loopback or address.is_link_local)
 
 
 def normalise_model(name: str) -> str:

@@ -502,11 +502,15 @@ async def test_a_command_that_reached_no_entity_is_reported_as_failed(
 
 
 def _local_server(
-    aioclient_mock: AiohttpClientMocker, *, cap: int = 26, context: int | None = None
+    aioclient_mock: AiohttpClientMocker,
+    *,
+    cap: int = 26,
+    context: int | None = None,
+    base: str = LOCAL,
 ) -> None:
     """An Ollama-like server: two models, one of them a decision model."""
     aioclient_mock.get(
-        LOCAL + "/v1/models",
+        base + "/v1/models",
         json={"data": [{"id": "nimble:latest"}, {"id": "qwen3:4b"}]},
     )
 
@@ -549,8 +553,8 @@ def _local_server(
             method, url, json={"model": "nimble", "answers": {}, "usage": {}}
         )
 
-    aioclient_mock.post(LOCAL + "/api/show", side_effect=show)
-    aioclient_mock.post(LOCAL + "/v1/systemone", side_effect=systemone)
+    aioclient_mock.post(base + "/api/show", side_effect=show)
+    aioclient_mock.post(base + "/v1/systemone", side_effect=systemone)
 
 
 async def _through_probe(hass: HomeAssistant, result: dict) -> dict:
@@ -608,6 +612,21 @@ async def test_setup_discovers_what_the_server_can_take(
     assert "home" in timed[0]["state"], "the home's catalogue, not a probe"
 
 
+async def test_a_key_over_plain_http_to_a_public_server_is_refused(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """The key would travel unencrypted, so it is never sent."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_BASE_URL: "http://api.example.com", CONF_API_KEY: "sk-test"},
+    )
+    assert result["errors"] == {"base": "insecure_key"}
+    assert aioclient_mock.call_count == 0
+
+
 async def test_a_model_the_server_cannot_use_says_why(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):
@@ -634,14 +653,14 @@ async def test_reconfigure_keeps_the_profile_when_only_the_key_changes(
 ):
     """Same server and model: no point loading the model again to re-measure."""
     await _setup_home(hass)
-    _local_server(aioclient_mock)
-    profile = ServerProfile(
-        max_options=26, timeout=34.0, base_url=LOCAL, model="nimble"
-    )
+    # A key over plain http:// is only accepted on the local network.
+    lan = "http://192.168.1.20:11434"
+    _local_server(aioclient_mock, base=lan)
+    profile = ServerProfile(max_options=26, timeout=34.0, base_url=lan, model="nimble")
     entry = await _add_entry(
         hass,
         aioclient_mock,
-        base_url=LOCAL,
+        base_url=lan,
         model="nimble",
         server_profile=profile.as_dict(),
     )
@@ -650,7 +669,7 @@ async def test_reconfigure_keeps_the_profile_when_only_the_key_changes(
     result = await entry.start_reconfigure_flow(hass)
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
-        {CONF_BASE_URL: LOCAL, CONF_API_KEY: "a-new-key", CONF_API_TIMEOUT: 34.0},
+        {CONF_BASE_URL: lan, CONF_API_KEY: "a-new-key", CONF_API_TIMEOUT: 34.0},
     )
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {CONF_MODEL: "nimble"}
