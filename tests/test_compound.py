@@ -129,3 +129,67 @@ async def test_a_request_that_cannot_be_split_is_not_guessed_at(hass: HomeAssist
     execute.assert_not_called()
     assert response.response_type is intent.IntentResponseType.ERROR
     assert "nothing was done" in _speech(response)
+
+
+async def test_one_part_that_is_not_the_whole_request_runs_nothing(
+    hass: HomeAssistant,
+):
+    """The door must not be dropped silently while the lamp goes off."""
+    execute = AsyncMock(return_value=_done())
+    agent = _agent(hass, ["turn off the lamp"])
+    agent._rerun_single = AsyncMock()
+
+    response = await _run(agent, "turn off the lamp and lock the door", {}, execute)
+
+    agent._rerun_single.assert_not_called()
+    execute.assert_not_called()
+    assert response.response_type is intent.IntentResponseType.ERROR
+
+
+async def test_one_part_that_is_the_whole_request_runs_as_one(hass: HomeAssistant):
+    agent = _agent(hass, ["Turn off the lamp"])
+    agent._rerun_single = AsyncMock(return_value=_done())
+
+    await _run(agent, "turn off the lamp.", {}, AsyncMock())
+
+    agent._rerun_single.assert_awaited_once()
+
+
+async def test_a_question_keeps_its_answer(hass: HomeAssistant):
+    parts = ["turn on the lamp", "what time is it"]
+    plans = {
+        "turn on the lamp": _plan(Route.COMMAND, "Lamp"),
+        "what time is it": Plan(route=Route.QUERY),
+    }
+    answer = intent.IntentResponse(language="en")
+    answer.async_set_speech("It is 10:15")
+
+    with patch(f"{AGENT}.async_execute_query", AsyncMock(return_value=answer)):
+        response = await _run(
+            _agent(hass, parts), "...", plans, AsyncMock(return_value=_done())
+        )
+
+    assert _speech(response) == "Done: Lamp. It is 10:15."
+
+
+async def test_one_device_refusing_stops_the_rest(hass: HomeAssistant):
+    parts = ["turn off the lights", "lock the door"]
+    plans = {
+        "turn off the lights": _plan(Route.COMMAND, "them"),
+        "lock the door": _plan(Route.COMMAND, "Door"),
+    }
+    partial = intent.IntentResponse(language="en")
+    target = intent.IntentResponseTargetType.ENTITY
+    partial.async_set_results(
+        success_results=[intent.IntentResponseTarget(type=target, name="Lamp", id="a")],
+        failed_results=[
+            intent.IntentResponseTarget(type=target, name="Hall Light", id="b")
+        ],
+    )
+    execute = AsyncMock(side_effect=[partial, _done()])
+
+    response = await _run(_agent(hass, parts), "...", plans, execute)
+
+    assert execute.await_count == 1, "the door waits for the user"
+    assert "Hall Light did not respond" in _speech(response)
+    assert "stopped before lock the door" in _speech(response)
