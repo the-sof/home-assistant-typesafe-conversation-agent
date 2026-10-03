@@ -472,13 +472,13 @@ class TypeSafeAgent:
             return_exceptions=True,
         )
 
-        done: list[str] = []
-        failed: list[str] = []
-        # Sequential, in the order the user said them: "turn on the AC and set
-        # it to 20" only works one way round.
+        # Resolve every part before acting on any of them. Nothing physical can
+        # be undone, so an unclear second part must not leave the first one done.
+        plans: list[tuple[str, Plan]] = []
+        unclear: list[str] = []
         for part, result in zip(parts, results, strict=True):
             if isinstance(result, BaseException):
-                failed.append(part)
+                unclear.append(part)
                 continue
             sub_response, entities = result
             plan = route(
@@ -494,40 +494,63 @@ class TypeSafeAgent:
                 always_confirm_risky=self.settings.always_confirm_risky,
                 unavailable_ids=self._unavailable_ids(),
             )
-            # Never stop mid-way to ask a question: the user said four things
-            # and is not expecting an interrogation about the second.
+            # A clarifying question or a confirmation mid-way would leave the
+            # rest hanging, so anything but a plain command or query is unclear.
             if plan.route not in (Route.COMMAND, Route.QUERY):
-                failed.append(part)
+                unclear.append(part)
                 continue
+            plans.append((part, plan))
+        if unclear:
+            return self._error(
+                user_input,
+                intent.IntentResponseErrorCode.FAILED_TO_HANDLE,
+                f"I didn't do anything, because I wasn't sure about {_join(unclear)}. "
+                "Could you say that part again?",
+            )
+
+        # In the order the user said them: "turn on the AC and set it to 20" only
+        # works one way round. Stop at the first failure, for the same reason.
+        done: list[str] = []
+        failed: list[str] = []
+        skipped: list[str] = []
+        for index, (part, plan) in enumerate(plans):
             sub_input = _with_text(user_input, part)
             try:
                 if plan.route is Route.QUERY:
-                    await async_execute_query(self.hass, plan, sub_input)
+                    result = await async_execute_query(self.hass, plan, sub_input)
                 else:
-                    await async_execute(self.hass, plan, sub_input, self.catalog)
-                done.append(plan.target.described)
+                    result = await async_execute(
+                        self.hass, plan, sub_input, self.catalog
+                    )
+                if _step_failed(result):
+                    raise ExecutionError("The step did not reach its target")
             except (ExecutionError, intent.IntentError) as err:
                 LOGGER.debug("Sub-command %r failed: %s", part, err)
                 failed.append(part)
+                skipped = [text for text, _ in plans[index + 1 :]]
+                break
+            done.append(plan.target.described)
 
-        return self._compound_response(user_input, done, failed)
+        return self._compound_response(user_input, done, failed, skipped)
 
     def _compound_response(
         self,
         user_input: conversation.ConversationInput,
         done: list[str],
         failed: list[str],
+        skipped: list[str],
     ) -> intent.IntentResponse:
+        # The user needs to know precisely what did and did not happen.
+        stopped = f", so I stopped before {_join(skipped)}" if skipped else ""
         if not done:
             return self._error(
                 user_input,
                 intent.IntentResponseErrorCode.FAILED_TO_HANDLE,
-                "Sorry, I couldn't do any of that.",
+                f"Sorry, I couldn't {_join(failed)}{stopped}.",
             )
         speech = f"Done: {_join(done)}."
         if failed:
-            # The user needs to know precisely what did not happen.
-            speech = f"Done: {_join(done)}. But I couldn't {_join(failed)}."
+            speech += f" But I couldn't {_join(failed)}{stopped}."
         return self._speech(user_input, speech)
 
     async def _rerun_single(
@@ -753,6 +776,13 @@ def _with_text(
         language=user_input.language,
         agent_id=user_input.agent_id,
         extra_system_prompt=user_input.extra_system_prompt,
+    )
+
+
+def _step_failed(result: intent.IntentResponse) -> bool:
+    """An error response, or one where every entity refused."""
+    return result.response_type is intent.IntentResponseType.ERROR or bool(
+        _wholly_failed(result)
     )
 
 
