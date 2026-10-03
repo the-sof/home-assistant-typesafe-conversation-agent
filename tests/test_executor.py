@@ -411,3 +411,121 @@ async def test_a_query_against_an_unavailable_entity_still_runs(
     )
     response = await async_execute_query(hass, plan, _input(hass))
     assert response.response_type is not intent.IntentResponseType.ERROR
+
+
+# --- relative changes start from what the devices report ----------------------
+
+
+def _light(entity_id: str, area_id: str | None = "kitchen"):
+    from custom_components.typesafe_conversation.entities import CatalogEntity
+
+    return CatalogEntity(
+        entity_id=entity_id,
+        name=entity_id,
+        aliases=(),
+        area_id=area_id,
+        area_name=area_id,
+        floor_name=None,
+        domain="light",
+        device_class=None,
+        supported_features=0,
+    )
+
+
+async def _relative_slots(hass, action, target, entities, step):
+    from types import SimpleNamespace
+
+    from custom_components.typesafe_conversation.executor import _add_value_slots
+
+    plan = Plan(
+        Route.COMMAND,
+        domain="light",
+        action=action,
+        spec=spec_for("light", action),
+        target=target,
+        relative_step=step,
+    )
+    slots: dict = {}
+    await _add_value_slots(hass, plan, slots, SimpleNamespace(entities=entities))
+    return slots["brightness"]["value"]
+
+
+async def test_brighter_on_an_off_light_starts_from_zero(hass: HomeAssistant):
+    lamp = _light("light.lamp")
+    hass.states.async_set("light.lamp", "off")
+    value = await _relative_slots(hass, "brighter", Target(entity=lamp), [lamp], 25)
+    assert value == 25, "not 75, from an assumed 50%"
+
+
+async def test_dimmer_on_an_off_light_says_so(hass: HomeAssistant):
+    from custom_components.typesafe_conversation.executor import ExecutionError
+
+    lamp = _light("light.lamp")
+    hass.states.async_set("light.lamp", "off")
+    with pytest.raises(ExecutionError, match="already off"):
+        await _relative_slots(hass, "dimmer", Target(entity=lamp), [lamp], -25)
+
+
+@pytest.mark.parametrize(
+    ("state", "attributes"),
+    [
+        ("unavailable", {}),
+        ("on", {"brightness": float("nan")}),
+        ("on", {"brightness": True}),
+        ("on", {}),
+    ],
+)
+async def test_an_unknown_level_is_never_guessed(
+    hass: HomeAssistant, state, attributes
+):
+    from custom_components.typesafe_conversation.executor import ExecutionError
+
+    lamp = _light("light.lamp")
+    hass.states.async_set("light.lamp", state, attributes)
+    with pytest.raises(ExecutionError, match="say a value"):
+        await _relative_slots(hass, "dimmer", Target(entity=lamp), [lamp], -25)
+
+
+async def test_a_room_starts_from_the_mean_of_its_lights(hass: HomeAssistant):
+    """ "It's too bright in here" targets the room, not one lamp."""
+    a, b, other = _light("light.a"), _light("light.b"), _light("light.c", "hall")
+    hass.states.async_set("light.a", "on", {"brightness": 255})
+    hass.states.async_set("light.b", "on", {"brightness": 127.5})
+    hass.states.async_set("light.c", "on", {"brightness": 0})
+    value = await _relative_slots(
+        hass, "dimmer", Target(area_id="kitchen", domain="light"), [a, b, other], -25
+    )
+    assert value == 50, "mean of 100% and 50%, minus 25; the hall is not counted"
+
+
+async def test_an_unknown_thermostat_setpoint_is_not_assumed(hass: HomeAssistant):
+    from types import SimpleNamespace
+
+    from custom_components.typesafe_conversation.entities import CatalogEntity
+    from custom_components.typesafe_conversation.executor import (
+        ExecutionError,
+        _add_value_slots,
+    )
+
+    stat = CatalogEntity(
+        entity_id="climate.stat",
+        name="Thermostat",
+        aliases=(),
+        area_id=None,
+        area_name=None,
+        floor_name=None,
+        domain="climate",
+        device_class=None,
+        supported_features=0,
+    )
+    hass.states.async_set("climate.stat", "heat", {})
+    plan = Plan(
+        Route.COMMAND,
+        domain="climate",
+        action="warmer",
+        spec=spec_for("climate", "warmer"),
+        target=Target(entity=stat),
+        relative_step=10,
+    )
+    with pytest.raises(ExecutionError, match="say a value"):
+        await _add_value_slots(hass, plan, {}, SimpleNamespace(entities=[stat]))

@@ -9,10 +9,17 @@ still getting Home Assistant's own exposure check and response speech.
 
 from __future__ import annotations
 
+import math
+from statistics import fmean
 from typing import Any
 
 from homeassistant.components import conversation
-from homeassistant.const import UnitOfTemperature
+from homeassistant.const import (
+    STATE_OFF,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+    UnitOfTemperature,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import intent
 
@@ -121,7 +128,7 @@ async def async_execute(
     if not slots:
         raise ExecutionError("Nothing to target", code="no_valid_targets")
 
-    await _add_value_slots(hass, plan, slots)
+    await _add_value_slots(hass, plan, slots, catalog)
 
     if plan.spec is None:
         raise ExecutionError("No action to perform")
@@ -130,7 +137,7 @@ async def async_execute(
 
 
 async def _add_value_slots(
-    hass: HomeAssistant, plan: Plan, slots: dict[str, Any]
+    hass: HomeAssistant, plan: Plan, slots: dict[str, Any], catalog: EntityCatalog
 ) -> None:
     spec = plan.spec
     if spec is None:
@@ -151,12 +158,12 @@ async def _add_value_slots(
             slots[spec.value_slot] = _slot(max(-100, min(100, step)))
             return
         if spec.value_kind == "temperature":
-            current = _current_number(hass, plan, "temperature") or 20.0
+            current = _current_value(hass, plan, catalog, step)
             # A percentage-point step makes no sense for temperature; treat the
             # magnitude as tenths of a degree per point (1pp -> 0.1 degree).
             slots[spec.value_slot] = _slot(round(current + step * 0.1, 1))
             return
-        current = _current_percent(hass, plan, spec.value_kind)
+        current = _current_value(hass, plan, catalog, step)
         slots[spec.value_slot] = _slot(max(1, min(100, int(current + step))))
         return
 
@@ -172,26 +179,72 @@ async def _add_value_slots(
         slots[spec.value_slot] = _slot(plan.value)
 
 
-def _current_number(hass: HomeAssistant, plan: Plan, attribute: str) -> float | None:
-    if plan.target.entity is None:
-        return None
-    state = hass.states.get(plan.target.entity.entity_id)
-    if state is None:
-        return None
-    value = state.attributes.get(attribute)
-    return float(value) if isinstance(value, (int, float)) else None
+_RELATIVE_ATTRIBUTE = {
+    "light": "brightness",
+    "fan": "percentage",
+    "cover": "current_position",
+    "climate": "temperature",
+    "water_heater": "temperature",
+}
 
 
-def _current_percent(hass: HomeAssistant, plan: Plan, kind: str | None) -> float:
-    """Read the current value a relative change is relative *to*."""
-    if plan.domain == "light":
-        raw = _current_number(hass, plan, "brightness")
-        return (raw / 255 * 100) if raw is not None else 50.0
-    if plan.domain == "fan":
-        return _current_number(hass, plan, "percentage") or 50.0
-    if plan.domain == "cover":
-        return _current_number(hass, plan, "current_position") or 50.0
-    return 50.0
+def _current_value(
+    hass: HomeAssistant, plan: Plan, catalog: EntityCatalog, step: int
+) -> float:
+    """What a relative change is relative *to*, read from the real states.
+
+    Never a made-up default: changing "a bit" from an assumed 50% can brighten
+    a light the user wanted dimmer. A room or floor uses the mean of what its
+    targeted devices report. With nothing to read, the user is asked for an
+    absolute value instead.
+    """
+    attribute = _RELATIVE_ATTRIBUTE.get(plan.domain or "")
+    values: list[float] = []
+    all_off = True
+    for entity_id in _relative_targets(plan, catalog):
+        state = hass.states.get(entity_id)
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            continue
+        if plan.domain == "light" and state.state == STATE_OFF:
+            values.append(0.0)
+            continue
+        all_off = False
+        raw = state.attributes.get(attribute) if attribute else None
+        if _finite(raw):
+            values.append(raw / 255 * 100 if plan.domain == "light" else float(raw))
+    if values and plan.domain == "light" and all_off and step <= 0:
+        raise ExecutionError("It's already off.")
+    if not values:
+        raise ExecutionError(
+            "I don't know its current level, so please say a value instead."
+        )
+    return fmean(values)
+
+
+def _relative_targets(plan: Plan, catalog: EntityCatalog) -> list[str]:
+    target = plan.target
+    if target.entity is not None:
+        return [target.entity.entity_id]
+    area_id = target.area_id or plan.preferred_area_id
+    return [
+        e.entity_id
+        for e in catalog.entities
+        if e.domain == plan.domain
+        and (
+            target.whole_house
+            or (area_id is not None and e.area_id == area_id)
+            or (target.floor_name is not None and e.floor_name == target.floor_name)
+        )
+    ]
+
+
+def _finite(value: Any) -> bool:
+    """A real number: not a bool, not NaN or infinity."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
 
 
 async def _execute_whole_house(
