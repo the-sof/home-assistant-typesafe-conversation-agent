@@ -10,7 +10,7 @@ still getting Home Assistant's own exposure check and response speech.
 from __future__ import annotations
 
 import math
-from statistics import fmean
+from dataclasses import replace
 from typing import Any
 
 from homeassistant.components import conversation
@@ -33,7 +33,7 @@ from .actions import (
     INTENT_TURN_ON,
 )
 from .const import CONVERSATION_DOMAIN, DOMAIN, LOGGER
-from .entities import CONTROLLABLE_DOMAINS, EntityCatalog
+from .entities import CONTROLLABLE_DOMAINS, CatalogEntity, EntityCatalog
 from .router import Plan, Target
 
 
@@ -119,6 +119,13 @@ async def async_execute(
     """Carry out a COMMAND plan."""
     if plan.target.whole_house and plan.target.domain is None:
         return await _execute_whole_house(hass, plan, user_input, catalog)
+    if (
+        plan.spec is not None
+        and plan.spec.relative
+        and plan.spec.value_kind != "volume_step"
+        and plan.target.entity is None
+    ):
+        return await _execute_relative_each(hass, plan, user_input, catalog)
 
     slots = build_slots(
         plan.target,
@@ -128,7 +135,7 @@ async def async_execute(
     if not slots:
         raise ExecutionError("Nothing to target", code="no_valid_targets")
 
-    await _add_value_slots(hass, plan, slots, catalog)
+    await _add_value_slots(hass, plan, slots)
 
     if plan.spec is None:
         raise ExecutionError("No action to perform")
@@ -137,7 +144,7 @@ async def async_execute(
 
 
 async def _add_value_slots(
-    hass: HomeAssistant, plan: Plan, slots: dict[str, Any], catalog: EntityCatalog
+    hass: HomeAssistant, plan: Plan, slots: dict[str, Any]
 ) -> None:
     spec = plan.spec
     if spec is None:
@@ -158,12 +165,12 @@ async def _add_value_slots(
             slots[spec.value_slot] = _slot(max(-100, min(100, step)))
             return
         if spec.value_kind == "temperature":
-            current = _current_value(hass, plan, catalog, step)
+            current = _current_value(hass, plan, step)
             # A percentage-point step makes no sense for temperature; treat the
             # magnitude as tenths of a degree per point (1pp -> 0.1 degree).
             slots[spec.value_slot] = _slot(round(current + step * 0.1, 1))
             return
-        current = _current_value(hass, plan, catalog, step)
+        current = _current_value(hass, plan, step)
         slots[spec.value_slot] = _slot(max(1, min(100, int(current + step))))
         return
 
@@ -188,54 +195,111 @@ _RELATIVE_ATTRIBUTE = {
 }
 
 
-def _current_value(
-    hass: HomeAssistant, plan: Plan, catalog: EntityCatalog, step: int
-) -> float:
-    """What a relative change is relative *to*, read from the real states.
+def _current_value(hass: HomeAssistant, plan: Plan, step: int) -> float:
+    """What a relative change is relative *to*, read from the device's state.
 
     Never a made-up default: changing "a bit" from an assumed 50% can brighten
-    a light the user wanted dimmer. A room or floor uses the mean of what its
-    targeted devices report. With nothing to read, the user is asked for an
-    absolute value instead.
+    a light the user wanted dimmer. With nothing to read, the user is asked for
+    an absolute value instead.
     """
+    entity = plan.target.entity
+    state = hass.states.get(entity.entity_id) if entity is not None else None
+    if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        raise ExecutionError(_UNKNOWN_LEVEL)
+    if plan.domain == "light" and state.state == STATE_OFF:
+        if step <= 0:
+            raise ExecutionError("It's already off.")
+        return 0.0
     attribute = _RELATIVE_ATTRIBUTE.get(plan.domain or "")
-    values: list[float] = []
-    all_off = True
-    for entity_id in _relative_targets(plan, catalog):
-        state = hass.states.get(entity_id)
-        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            continue
-        if plan.domain == "light" and state.state == STATE_OFF:
-            values.append(0.0)
-            continue
-        all_off = False
-        raw = state.attributes.get(attribute) if attribute else None
-        if _finite(raw):
-            values.append(raw / 255 * 100 if plan.domain == "light" else float(raw))
-    if values and plan.domain == "light" and all_off and step <= 0:
-        raise ExecutionError("It's already off.")
-    if not values:
-        raise ExecutionError(
-            "I don't know its current level, so please say a value instead."
-        )
-    return fmean(values)
+    raw = state.attributes.get(attribute) if attribute else None
+    if not _finite(raw):
+        raise ExecutionError(_UNKNOWN_LEVEL)
+    return raw / 255 * 100 if plan.domain == "light" else float(raw)
 
 
-def _relative_targets(plan: Plan, catalog: EntityCatalog) -> list[str]:
+_UNKNOWN_LEVEL = "I don't know its current level, so please say a value instead."
+
+
+async def _execute_relative_each(
+    hass: HomeAssistant,
+    plan: Plan,
+    user_input: conversation.ConversationInput,
+    catalog: EntityCatalog,
+) -> intent.IntentResponse:
+    """A relative change on a room, floor or the house, one device at a time.
+
+    One intent for the whole area would set every device to the same level and
+    switch on the lights that were off. Each light that is on moves from its own
+    level instead; only when all of them are off does "brighter" turn them on.
+    """
+    step = plan.relative_step or 0
+    live = [
+        e
+        for e in _relative_targets(plan, catalog)
+        if (state := hass.states.get(e.entity_id)) is not None
+        and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+    ]
+    targets = live
+    if plan.domain == "light":
+        targets = [e for e in live if hass.states.get(e.entity_id).state != STATE_OFF]
+        if not targets and live:
+            if step <= 0:
+                raise ExecutionError("They're already off.")
+            targets = live
+    if not targets:
+        raise ExecutionError(_UNKNOWN_LEVEL)
+
+    if len(targets) == 1:
+        # One device: its own error, if any, says best what went wrong.
+        one = replace(plan, target=Target(entity=targets[0], domain=plan.domain))
+        return await async_execute(hass, one, user_input, catalog)
+
+    success: list[intent.IntentResponseTarget] = []
+    failed: list[intent.IntentResponseTarget] = []
+    for entity in targets:
+        one = replace(plan, target=Target(entity=entity, domain=plan.domain))
+        try:
+            response = await async_execute(hass, one, user_input, catalog)
+        except (ExecutionError, intent.IntentError) as err:
+            LOGGER.debug("Relative change on %s failed: %s", entity.entity_id, err)
+            failed.append(_entity_target(entity))
+            continue
+        success.extend(response.success_results)
+        failed.extend(response.failed_results)
+    merged = intent.IntentResponse(language=user_input.language)
+    merged.async_set_results(success_results=success, failed_results=failed)
+    return merged
+
+
+def _entity_target(entity: CatalogEntity) -> intent.IntentResponseTarget:
+    return intent.IntentResponseTarget(
+        type=intent.IntentResponseTargetType.ENTITY,
+        name=entity.name,
+        id=entity.entity_id,
+    )
+
+
+def _relative_targets(plan: Plan, catalog: EntityCatalog) -> list[CatalogEntity]:
+    """The devices a relative change applies to.
+
+    The speaker's room is a preference, not a filter: from a room without a
+    thermostat, "warmer" still reaches the only thermostat in the house.
+    """
     target = plan.target
     if target.entity is not None:
-        return [target.entity.entity_id]
-    area_id = target.area_id or plan.preferred_area_id
-    return [
-        e.entity_id
-        for e in catalog.entities
-        if e.domain == plan.domain
-        and (
-            target.whole_house
-            or (area_id is not None and e.area_id == area_id)
-            or (target.floor_name is not None and e.floor_name == target.floor_name)
-        )
-    ]
+        return [target.entity]
+    of_domain = [e for e in catalog.entities if e.domain == plan.domain]
+    if target.whole_house:
+        return of_domain
+    if target.area_id is not None:
+        return [e for e in of_domain if e.area_id == target.area_id]
+    if target.floor_name is not None:
+        return [e for e in of_domain if e.floor_name == target.floor_name]
+    if plan.preferred_area_id is not None:
+        preferred = [e for e in of_domain if e.area_id == plan.preferred_area_id]
+        if preferred:
+            return preferred
+    return of_domain if len(of_domain) == 1 else []
 
 
 def _finite(value: Any) -> bool:
