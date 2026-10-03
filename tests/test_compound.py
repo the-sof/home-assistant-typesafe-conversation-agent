@@ -192,4 +192,5 @@ async def test_one_device_refusing_stops_the_rest(hass: HomeAssistant):
 
     assert execute.await_count == 1, "the door waits for the user"
     assert "Hall Light did not respond" in _speech(response)
+    assert "may have changed" in _speech(response), "the Lamp did go off"
     assert "stopped before lock the door" in _speech(response)

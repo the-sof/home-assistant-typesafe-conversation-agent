@@ -559,7 +559,10 @@ class TypeSafeAgent:
                 elif refused := _refused(result):
                     # Even one device refusing counts: the rest of the request
                     # may depend on it, and the user should know which one.
-                    failed.append(f"{part} ({_join(refused)} did not respond)")
+                    failed.append(
+                        f"{part} ({_join(refused)} did not respond, "
+                        "though the rest of that may have changed)"
+                    )
                 elif plan.route is Route.QUERY and (answer := _spoken(result)):
                     # The answer is the point of a question; keep what it said.
                     answers.append(answer)
