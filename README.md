@@ -337,7 +337,7 @@ if you would rather wait.
 ## Development
 
 ```sh
-python3.14 -m venv .venv        # Home Assistant 2026.5+ requires Python 3.14
+python3.14 -m venv .venv        # Home Assistant 2026.5+ requires Python 3.14.2 or newer
 .venv/bin/pip install "pytest-homeassistant-custom-component==0.13.367" syrupy ruff
 .venv/bin/pip install "gazetteer-matcher==1.1.0" "hassil==3.12.1" "home-assistant-intents==2026.8.28"
 .venv/bin/python -m pytest

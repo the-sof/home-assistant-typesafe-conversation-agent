@@ -19,8 +19,8 @@ jobs:
       - uses: home-assistant/actions/hassfest@master
 
   hacs:
-    # The same validation the HACS default store runs on submission, so it
-    # blocks: a release is only cut once this and hassfest pass on main.
+    # The same validation the HACS default store runs on submission. A failure
+    # fails this workflow; wait for it to pass on main before releasing.
     name: HACS
     runs-on: ubuntu-latest
     steps:

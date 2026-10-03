@@ -23,7 +23,7 @@ public issue.
 
 ## Development setup
 
-Python 3.14 is required, because Home Assistant requires it.
+Python 3.14.2 or newer is required, because Home Assistant requires it.
 
 ```sh
 python3.14 -m venv .venv
