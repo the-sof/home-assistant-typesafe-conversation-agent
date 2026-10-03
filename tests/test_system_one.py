@@ -417,6 +417,8 @@ async def test_a_response_that_is_not_an_object_counts_as_a_failure(client, mock
         ("http://box.local:11434", "sk", False),
         ("http://192.168.1.20:11434", "sk", False),
         ("http://[::1]:11434", "sk", False),
+        ("http://[2606:4700:4700::1111]:11434", "sk", True),
+        ("http://[fd00::20]:11434", "sk", False),
     ],
 )
 def test_a_key_is_only_refused_where_it_would_cross_the_internet(url, key, leaks):

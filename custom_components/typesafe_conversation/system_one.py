@@ -204,12 +204,13 @@ def key_would_leak(base_url: str | None, api_key: str | None) -> bool:
     if parts.scheme != "http":
         return False
     host = (parts.hostname or "").lower()
-    if host == "localhost" or host.endswith(".local") or "." not in host:
-        return False
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        return True
+        # A name: local only if it is localhost, mDNS, or a single label such
+        # as a Docker service. Checked after the address, since an IPv6
+        # literal has no dots either.
+        return not (host == "localhost" or host.endswith(".local") or "." not in host)
     return not (address.is_private or address.is_loopback or address.is_link_local)
 
 
