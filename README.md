@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/the-sof/home-assistant-typesafe-conversation-agent/main/custom_components/typesafe_conversation/brand/icon.png" alt="TypeSafe Conversation" width="128"></p>
+
 # TypeSafe Conversation for Home Assistant
 
 [![tests](https://github.com/the-sof/home-assistant-typesafe-conversation-agent/actions/workflows/test.yml/badge.svg)](https://github.com/the-sof/home-assistant-typesafe-conversation-agent/actions/workflows/test.yml)
@@ -8,9 +10,9 @@ A Home Assistant conversation agent that decides with a
 [TypeSafe System One](https://docs.typesafe.ai) model instead of an LLM.
 
 > **Status: early.** Expect rough edges, and please
-> [report them](../../issues/new?template=bug_report.yml). Requires a
-> [TypeSafe](https://console.typesafe.ai/) API key, which is metered — see
-> [Cost](#cost).
+> [report them](../../issues/new?template=bug_report.yml). TypeSafe's hosted API
+> needs a [TypeSafe](https://console.typesafe.ai/) API key, which is metered (see
+> [Cost](#cost)); a [local server](#running-locally) needs none.
 
 A System One model returns typed, calibrated judgements rather than text. Jev is
 the one available today and the default; the integration is not written around
