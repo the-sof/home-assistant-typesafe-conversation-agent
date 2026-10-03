@@ -19,19 +19,10 @@ jobs:
       - uses: home-assistant/actions/hassfest@master
 
   hacs:
-    # Reports only, deliberately. The action resolves the repository through the
-    # GitHub API against the default branch, so while this repo is private it
-    # cannot see LICENSE, manifest.json or hacs.json and fails for reasons that
-    # say nothing about the code. Two of its checks are also default-store
-    # requirements we have not done yet: repository topics, and brand assets in
-    # home-assistant/brands.
-    #
-    # Make this blocking once the repo is public, topics are set and brands has
-    # merged - at which point it becomes the real gate for a default-store
-    # submission.
+    # The same validation the HACS default store runs on submission, so it
+    # blocks: a release is only cut once this and hassfest pass on main.
     name: HACS
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
       - uses: hacs/action@main
