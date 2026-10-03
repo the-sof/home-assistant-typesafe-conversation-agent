@@ -195,7 +195,9 @@ def normalise_model(name: str) -> str:
     return name[: -len(":latest")] if name.endswith(":latest") else name
 
 
-def _parse_answers(payload: dict[str, Any]) -> dict[str, Answer]:
+def _parse_answers(payload: Any) -> dict[str, Answer]:
+    if not isinstance(payload, dict):
+        raise SystemOneError("Malformed response from the server")
     answers = payload.get("answers", {})
     if not isinstance(answers, dict):
         raise SystemOneError("Malformed answers from the server")
@@ -210,7 +212,7 @@ def _parse_answer(key: str, payload: Any) -> Answer:
     """
     try:
         return _parse_typed_answer(payload)
-    except (KeyError, TypeError, AttributeError, ValueError) as err:
+    except (KeyError, TypeError, AttributeError, ValueError, OverflowError) as err:
         raise SystemOneError(f"Malformed answer for {key!r}") from err
 
 

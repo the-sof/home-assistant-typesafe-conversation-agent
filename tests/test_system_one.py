@@ -389,3 +389,18 @@ async def test_a_redirect_is_refused_with_a_hint(client, mocker):
     with pytest.raises(SystemOneRequestError, match="https://"):
         await client.async_ask("state", {"q": {}})
     assert mocker.call_count == 1
+
+
+def test_an_integer_too_large_for_a_float_is_rejected():
+    from custom_components.typesafe_conversation.system_one import _parse_answer
+
+    with pytest.raises(SystemOneError):
+        _parse_answer("q", {"type": "score", "score": 10**400, "probabilities": {}})
+
+
+async def test_a_response_that_is_not_an_object_counts_as_a_failure(client, mocker):
+    mocker.post("https://api.typesafe.ai/v1/systemone", json=[])
+    with pytest.raises(SystemOneError):
+        await client.async_ask("state", {"q": {}})
+    assert client._consecutive_failures == 1
+
