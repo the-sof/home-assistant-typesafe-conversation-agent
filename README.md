@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/the-sof/home-assistant-typesafe-conversation-agent/main/custom_components/typesafe_conversation/brand/icon.png" alt="TypeSafe Conversation" width="128"></p>
+
 # TypeSafe Conversation for Home Assistant
 
 [![tests](https://github.com/the-sof/home-assistant-typesafe-conversation-agent/actions/workflows/test.yml/badge.svg)](https://github.com/the-sof/home-assistant-typesafe-conversation-agent/actions/workflows/test.yml)
@@ -8,9 +10,9 @@ A Home Assistant conversation agent that decides with a
 [TypeSafe System One](https://docs.typesafe.ai) model instead of an LLM.
 
 > **Status: early.** Expect rough edges, and please
-> [report them](../../issues/new?template=bug_report.yml). Requires a
-> [TypeSafe](https://console.typesafe.ai/) API key, which is metered — see
-> [Cost](#cost).
+> [report them](../../issues/new?template=bug_report.yml). TypeSafe's hosted API
+> needs a [TypeSafe](https://console.typesafe.ai/) API key, which is metered (see
+> [Cost](#cost)); a [local server](#running-locally) needs none.
 
 A System One model returns typed, calibrated judgements rather than text. Jev is
 the one available today and the default; the integration is not written around
@@ -335,9 +337,9 @@ if you would rather wait.
 ## Development
 
 ```sh
-python3.14 -m venv .venv        # Home Assistant 2026.5+ requires Python 3.14
-.venv/bin/pip install "pytest-homeassistant-custom-component==0.13.348" syrupy ruff
-.venv/bin/pip install "hassil==3.8.0" "home-assistant-intents==2026.6.24"
+python3.14 -m venv .venv        # Home Assistant 2026.5+ requires Python 3.14.2 or newer
+.venv/bin/pip install "pytest-homeassistant-custom-component==0.13.367" syrupy ruff
+.venv/bin/pip install "gazetteer-matcher==1.1.0" "hassil==3.12.1" "home-assistant-intents==2026.8.28"
 .venv/bin/python -m pytest
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
 ```
@@ -348,7 +350,7 @@ current one, plus Home Assistant's `hassfest` and the HACS validator. See
 
 The harness version is a **test-environment** choice, not the supported range —
 see *Install* for that. Each release pins exactly one core version
-(`0.13.348` → `homeassistant==2026.7.4`, `0.13.329` → `2026.5.0`), and a mismatch
+(`0.13.367` → `homeassistant==2026.9.4`, `0.13.329` → `2026.5.0`), and a mismatch
 against an already-installed `homeassistant` produces confusing import errors.
 
 The third line is the `conversation` component's own requirements, which the

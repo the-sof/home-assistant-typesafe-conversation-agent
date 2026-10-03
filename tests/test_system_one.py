@@ -21,6 +21,7 @@ from custom_components.typesafe_conversation.system_one import (
     ServerProfile,
     SystemOneAuthError,
     SystemOneClient,
+    SystemOneError,
     SystemOneRequestError,
     SystemOneUnavailableError,
 )
@@ -334,3 +335,93 @@ async def test_timing_a_request_the_server_rejects_says_why(mocker):
     client = SystemOneClient(session, None, "tev1:4b", base_url=LOCAL)
     with pytest.raises(SystemOneRequestError, match="5373 tokens"):
         await client.async_time_request({}, {})
+
+
+# --- malformed answers never reach the router ---------------------------------
+
+_CHOICE = {
+    "type": "choice",
+    "choice": "light",
+    "probabilities": {"light": 0.9, "fan": 0.1},
+    "confidence": 0.8,
+}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {**_CHOICE, "confidence": float("nan")},
+        {**_CHOICE, "probabilities": {"light": 1.5, "fan": 0.1}},
+        {**_CHOICE, "choice": "switch"},
+        {k: v for k, v in _CHOICE.items() if k != "confidence"},
+        {"type": "score", "score": True, "probabilities": {}, "confidence": 0.5},
+        {"type": "noul", "noul": "0.4"},
+        {"type": "mystery"},
+        "not an object",
+    ],
+)
+def test_a_malformed_answer_is_rejected(answer):
+    from custom_components.typesafe_conversation.system_one import _parse_answer
+
+    with pytest.raises(SystemOneError, match="target_domain"):
+        _parse_answer("target_domain", answer)
+
+
+async def test_a_malformed_answer_counts_against_the_breaker(client, mocker):
+    """Not retried, but counted: a server returning garbage should trip it."""
+    mocker.post(
+        "https://api.typesafe.ai/v1/systemone",
+        json={"answers": {"q": {**_CHOICE, "choice": "switch"}}, "usage": {}},
+    )
+    with pytest.raises(SystemOneError):
+        await client.async_ask("state", {"q": {}})
+    assert mocker.call_count == 1, "the same request would fail the same way"
+    assert client._consecutive_failures == 1
+
+
+async def test_a_redirect_is_refused_with_a_hint(client, mocker):
+    """Following it would resend the key; usually http:// should be https://."""
+    mocker.post(
+        "https://api.typesafe.ai/v1/systemone",
+        status=301,
+        headers={"Location": "https://elsewhere.invalid/v1/systemone"},
+    )
+    with pytest.raises(SystemOneRequestError, match="https://"):
+        await client.async_ask("state", {"q": {}})
+    assert mocker.call_count == 1
+
+
+def test_an_integer_too_large_for_a_float_is_rejected():
+    from custom_components.typesafe_conversation.system_one import _parse_answer
+
+    with pytest.raises(SystemOneError):
+        _parse_answer("q", {"type": "score", "score": 10**400, "probabilities": {}})
+
+
+async def test_a_response_that_is_not_an_object_counts_as_a_failure(client, mocker):
+    mocker.post("https://api.typesafe.ai/v1/systemone", json=[])
+    with pytest.raises(SystemOneError):
+        await client.async_ask("state", {"q": {}})
+    assert client._consecutive_failures == 1
+
+
+@pytest.mark.parametrize(
+    ("url", "key", "leaks"),
+    [
+        ("http://api.example.com", "sk", True),
+        ("http://8.8.8.8:8080", "sk", True),
+        ("https://api.example.com", "sk", False),
+        ("http://api.example.com", None, False),
+        ("http://localhost:11434", "sk", False),
+        ("http://ollama:11434", "sk", False),
+        ("http://box.local:11434", "sk", False),
+        ("http://192.168.1.20:11434", "sk", False),
+        ("http://[::1]:11434", "sk", False),
+        ("http://[2606:4700:4700::1111]:11434", "sk", True),
+        ("http://[fd00::20]:11434", "sk", False),
+    ],
+)
+def test_a_key_is_only_refused_where_it_would_cross_the_internet(url, key, leaks):
+    from custom_components.typesafe_conversation.system_one import key_would_leak
+
+    assert key_would_leak(url, key) is leaks

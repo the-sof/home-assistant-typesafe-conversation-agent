@@ -63,6 +63,7 @@ from .system_one import (
     SystemOneClient,
     SystemOneError,
     SystemOneRequestError,
+    key_would_leak,
     normalise_base_url,
     normalise_model,
 )
@@ -175,6 +176,8 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
         self._data[CONF_BASE_URL] = normalise_base_url(user_input.get(CONF_BASE_URL))
         if not user_input.get(CONF_API_KEY):
             self._data.pop(CONF_API_KEY, None)
+        if key_would_leak(self._data[CONF_BASE_URL], self._data.get(CONF_API_KEY)):
+            return "insecure_key"
         client = self._client()
         try:
             names = await client.async_validate()
@@ -378,7 +381,11 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         entry = self._get_reauth_entry()
-        if user_input is not None:
+        if user_input is not None and key_would_leak(
+            entry.data.get(CONF_BASE_URL), user_input[CONF_API_KEY]
+        ):
+            errors["base"] = "insecure_key"
+        elif user_input is not None:
             client = SystemOneClient(
                 async_get_clientsession(self.hass),
                 user_input[CONF_API_KEY],

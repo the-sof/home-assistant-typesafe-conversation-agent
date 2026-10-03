@@ -10,6 +10,7 @@ the requests where it turns out to matter.
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -459,11 +460,21 @@ class TypeSafeAgent:
             return await self._fallback(user_input, chat_log, None)
 
         parts = await self.llm.split_compound(user_input.text)
-        if len(parts) <= 1:
-            # Not actually compound, or the split failed. Either way, one more
-            # pass without the compound branch resolves it.
-            return await self._rerun_single(
-                parts[0] if parts else user_input.text, user_input, chat_log
+        if not parts:
+            return self._error(
+                user_input,
+                intent.IntentResponseErrorCode.FAILED_TO_HANDLE,
+                _UNSPLITTABLE,
+            )
+        if len(parts) == 1:
+            if _same_words(parts[0], user_input.text):
+                # Not actually compound: one more pass without the compound branch.
+                return await self._rerun_single(parts[0], user_input, chat_log)
+            # One part that is not the whole request leaves the rest unsaid.
+            return self._error(
+                user_input,
+                intent.IntentResponseErrorCode.FAILED_TO_HANDLE,
+                _UNSPLITTABLE,
             )
 
         speaker_area_id = self._speaker_area(user_input)
@@ -472,13 +483,30 @@ class TypeSafeAgent:
             return_exceptions=True,
         )
 
-        done: list[str] = []
-        failed: list[str] = []
-        # Sequential, in the order the user said them: "turn on the AC and set
-        # it to 20" only works one way round.
+        plans, unclear = self._resolve_parts(parts, results, speaker_area_id)
+        if unclear:
+            return self._error(
+                user_input,
+                intent.IntentResponseErrorCode.FAILED_TO_HANDLE,
+                f"I didn't do anything, because I wasn't sure about {_join(unclear)}. "
+                "Could you say that part again?",
+            )
+
+        return await self._run_parts(plans, user_input)
+
+    def _resolve_parts(
+        self,
+        parts: list[str],
+        results: list[Any],
+        speaker_area_id: str | None,
+    ) -> tuple[list[tuple[str, Plan]], list[str]]:
+        # Resolve every part before acting on any of them. Nothing physical can
+        # be undone, so an unclear second part must not leave the first one done.
+        plans: list[tuple[str, Plan]] = []
+        unclear: list[str] = []
         for part, result in zip(parts, results, strict=True):
             if isinstance(result, BaseException):
-                failed.append(part)
+                unclear.append(part)
                 continue
             sub_response, entities = result
             plan = route(
@@ -494,41 +522,79 @@ class TypeSafeAgent:
                 always_confirm_risky=self.settings.always_confirm_risky,
                 unavailable_ids=self._unavailable_ids(),
             )
-            # Never stop mid-way to ask a question: the user said four things
-            # and is not expecting an interrogation about the second.
+            # A clarifying question or a confirmation mid-way would leave the
+            # rest hanging, so anything but a plain command or query is unclear.
             if plan.route not in (Route.COMMAND, Route.QUERY):
-                failed.append(part)
+                unclear.append(part)
                 continue
+            plans.append((part, plan))
+        return plans, unclear
+
+    async def _run_parts(
+        self,
+        plans: list[tuple[str, Plan]],
+        user_input: conversation.ConversationInput,
+    ) -> intent.IntentResponse:
+        # In the order the user said them: "turn on the AC and set it to 20" only
+        # works one way round. Stop at the first failure, for the same reason.
+        done: list[str] = []
+        answers: list[str] = []
+        failed: list[str] = []
+        skipped: list[str] = []
+        for index, (part, plan) in enumerate(plans):
             sub_input = _with_text(user_input, part)
             try:
                 if plan.route is Route.QUERY:
-                    await async_execute_query(self.hass, plan, sub_input)
+                    result = await async_execute_query(self.hass, plan, sub_input)
                 else:
-                    await async_execute(self.hass, plan, sub_input, self.catalog)
-                done.append(plan.target.described)
+                    result = await async_execute(
+                        self.hass, plan, sub_input, self.catalog
+                    )
             except (ExecutionError, intent.IntentError) as err:
                 LOGGER.debug("Sub-command %r failed: %s", part, err)
                 failed.append(part)
+            else:
+                if result.response_type is intent.IntentResponseType.ERROR:
+                    failed.append(part)
+                elif refused := _refused(result):
+                    # Even one device refusing counts: the rest of the request
+                    # may depend on it, and the user should know which one.
+                    failed.append(
+                        f"{part} ({_join(refused)} did not respond, "
+                        "though the rest of that may have changed)"
+                    )
+                elif plan.route is Route.QUERY and (answer := _spoken(result)):
+                    # The answer is the point of a question; keep what it said.
+                    answers.append(answer)
+                else:
+                    done.append(plan.target.described)
+            if failed:
+                skipped = [text for text, _ in plans[index + 1 :]]
+                break
 
-        return self._compound_response(user_input, done, failed)
+        return self._compound_response(user_input, done, answers, failed, skipped)
 
     def _compound_response(
         self,
         user_input: conversation.ConversationInput,
         done: list[str],
+        answers: list[str],
         failed: list[str],
+        skipped: list[str],
     ) -> intent.IntentResponse:
-        if not done:
+        # The user needs to know precisely what did and did not happen.
+        stopped = f", so I stopped before {_join(skipped)}" if skipped else ""
+        if not done and not answers:
             return self._error(
                 user_input,
                 intent.IntentResponseErrorCode.FAILED_TO_HANDLE,
-                "Sorry, I couldn't do any of that.",
+                f"Sorry, I couldn't {_join(failed)}{stopped}.",
             )
-        speech = f"Done: {_join(done)}."
+        spoken = [f"Done: {_join(done)}."] if done else []
+        spoken += [a if a.endswith((".", "?", "!")) else f"{a}." for a in answers]
         if failed:
-            # The user needs to know precisely what did not happen.
-            speech = f"Done: {_join(done)}. But I couldn't {_join(failed)}."
-        return self._speech(user_input, speech)
+            spoken.append(f"But I couldn't {_join(failed)}{stopped}.")
+        return self._speech(user_input, " ".join(spoken))
 
     async def _rerun_single(
         self,
@@ -754,6 +820,34 @@ def _with_text(
         agent_id=user_input.agent_id,
         extra_system_prompt=user_input.extra_system_prompt,
     )
+
+
+_UNSPLITTABLE = (
+    "I couldn't split that into separate requests safely, so nothing was done. "
+    "Could you ask for one thing at a time?"
+)
+
+
+def _refused(result: intent.IntentResponse) -> list[str]:
+    """Every device that refused, even when others in the same step did not."""
+    return [
+        target.name
+        for target in result.failed_results
+        if target.type == intent.IntentResponseTargetType.ENTITY
+    ]
+
+
+def _spoken(result: intent.IntentResponse) -> str:
+    return result.speech.get("plain", {}).get("speech", "").strip()
+
+
+def _same_words(a: str, b: str) -> bool:
+    """Equal once case, punctuation and spacing are set aside."""
+
+    def words(text: str) -> list[str]:
+        return re.findall(r"\w+", text.lower())
+
+    return words(a) == words(b)
 
 
 def _join(items: list[str]) -> str:

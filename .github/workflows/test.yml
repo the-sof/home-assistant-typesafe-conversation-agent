@@ -20,8 +20,8 @@ jobs:
           # against is a guess, not a claim.
           - harness: "0.13.329"   # homeassistant 2026.5.0 - the declared floor
             label: "HA 2026.5.0 (floor)"
-          - harness: "0.13.348"   # homeassistant 2026.7.4 - current
-            label: "HA 2026.7.4 (current)"
+          - harness: "0.13.367"   # homeassistant 2026.9.4 - current
+            label: "HA 2026.9.4 (current)"
 
     name: ${{ matrix.label }}
 

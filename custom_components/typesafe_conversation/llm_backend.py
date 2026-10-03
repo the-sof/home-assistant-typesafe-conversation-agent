@@ -69,6 +69,7 @@ You are the voice assistant for a Home Assistant smart home.
 
 - Reply in plain spoken text. No markdown, no bullet lists, no emoji, no \
 headings.
+- Reply in the language the user spoke in.
 - Be brief: one or two sentences, under 40 words, as if speaking aloud.
 - You cannot control any device in this mode. Never claim to have turned \
 anything on or off, and never promise to do something.
@@ -137,10 +138,10 @@ class LLMBackend(ABC):
     async def split_compound(self, utterance: str) -> list[str]:
         """Break a compound request into atomic commands.
 
-        Never raises. If the model is slow, unreachable, or returns something
-        that is not a JSON array, we fall back to treating the utterance as a
-        single command - which is exactly what would have happened without the
-        compound question. A failure here must not cost the user their command.
+        Never raises. If the model is slow, unreachable, returns something that
+        is not an array of commands, or more of them than we accept, the result
+        is empty and nothing runs: running the whole sentence as one command, or
+        only its first few parts, would act on a guess at what was meant.
         """
         messages = [
             {"role": "system", "content": SPLIT_SYSTEM_PROMPT},
@@ -155,20 +156,20 @@ class LLMBackend(ABC):
             )
         except LLMBackendError as err:
             LOGGER.warning("Could not split a compound request (%s)", err)
-            return [utterance]
+            return []
         _log_exchange("split", self.name, self._model, messages, raw, metrics)
 
         parts = _parse_string_array(raw)
         if not parts:
             LOGGER.warning("LLM split returned no usable array: %r", raw[:200])
-            return [utterance]
+            return []
         if len(parts) > MAX_SUB_COMMANDS:
             LOGGER.warning(
-                "LLM split produced %s parts; keeping the first %s",
+                "LLM split produced %s parts, more than the %s accepted",
                 len(parts),
                 MAX_SUB_COMMANDS,
             )
-            parts = parts[:MAX_SUB_COMMANDS]
+            return []
         LOGGER.debug("Split %r into %s", utterance, parts)
         return parts
 
@@ -244,7 +245,7 @@ class OllamaBackend(LLMBackend):
         try:
             text = data["message"]["content"]
         except (KeyError, TypeError) as err:
-            raise LLMBackendError(f"Unexpected Ollama response: {data}") from err
+            raise LLMBackendError("Unexpected response shape from Ollama") from err
         return text, _ollama_metrics(data, elapsed)
 
     async def async_warm_up(self) -> None:
@@ -325,7 +326,7 @@ class OpenAICompatBackend(LLMBackend):
         try:
             text = data["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as err:
-            raise LLMBackendError(f"Unexpected response: {data}") from err
+            raise LLMBackendError("Unexpected response shape from the server") from err
         return text, _openai_metrics(data, elapsed)
 
 
@@ -450,17 +451,30 @@ async def _post_json(
                 json=payload,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=timeout),
+                allow_redirects=False,
             ) as response:
+                if 300 <= response.status < 400:
+                    raise LLMBackendError(
+                        f"The server redirected the request (HTTP {response.status}). "
+                        "Check the URL, for example http:// against https://."
+                    )
                 if response.status >= 400:
+                    # The body can echo the prompt, which holds the home's
+                    # state, so it stays out of the error and the warning log.
                     body = await response.text()
-                    raise LLMBackendError(f"HTTP {response.status}: {body[:300]}")
+                    LOGGER.debug(
+                        "HTTP %s from %s: %s", response.status, url, body[:300]
+                    )
+                    raise LLMBackendError(f"HTTP {response.status}")
                 return await response.json()
     except LLMBackendError:
         raise
     except TimeoutError as err:
         raise LLMBackendError(f"Timed out after {timeout}s") from err
     except aiohttp.ClientError as err:
-        raise LLMBackendError(str(err)) from err
+        raise LLMBackendError(
+            f"Could not reach the server ({type(err).__name__})"
+        ) from err
     except json.JSONDecodeError as err:
         raise LLMBackendError(f"Response was not JSON: {err}") from err
 
@@ -476,10 +490,11 @@ def _parse_string_array(raw: str) -> list[str]:
             parsed = json.loads(candidate)
         except json.JSONDecodeError, TypeError:
             continue
-        if isinstance(parsed, list):
-            items = [p.strip() for p in parsed if isinstance(p, str) and p.strip()]
-            if items:
-                return items
+        if isinstance(parsed, list) and parsed:
+            # One unusable item means the split as a whole can't be trusted.
+            if all(isinstance(p, str) and p.strip() for p in parsed):
+                return [p.strip() for p in parsed]
+            return []
     return []
 
 
