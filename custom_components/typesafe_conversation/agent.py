@@ -459,12 +459,16 @@ class TypeSafeAgent:
             return await self._fallback(user_input, chat_log, None)
 
         parts = await self.llm.split_compound(user_input.text)
-        if len(parts) <= 1:
-            # Not actually compound, or the split failed. Either way, one more
-            # pass without the compound branch resolves it.
-            return await self._rerun_single(
-                parts[0] if parts else user_input.text, user_input, chat_log
+        if not parts:
+            return self._error(
+                user_input,
+                intent.IntentResponseErrorCode.FAILED_TO_HANDLE,
+                "I couldn't split that into separate requests safely, so nothing "
+                "was done. Could you ask for one thing at a time?",
             )
+        if len(parts) == 1:
+            # Not actually compound: one more pass without the compound branch.
+            return await self._rerun_single(parts[0], user_input, chat_log)
 
         speaker_area_id = self._speaker_area(user_input)
         results = await asyncio.gather(

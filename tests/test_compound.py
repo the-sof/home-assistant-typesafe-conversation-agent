@@ -119,3 +119,13 @@ async def test_every_part_runs_in_the_order_it_was_said(hass: HomeAssistant):
     assert order == ["Lamp", "Cleaner"]
     assert _speech(response) == "Done: Lamp and Cleaner."
 
+
+async def test_a_request_that_cannot_be_split_is_not_guessed_at(hass: HomeAssistant):
+    """A failed split used to run the whole sentence as one command."""
+    execute = AsyncMock(return_value=_done())
+
+    response = await _run(_agent(hass, []), "do this and that", {}, execute)
+
+    execute.assert_not_called()
+    assert response.response_type is intent.IntentResponseType.ERROR
+    assert "nothing was done" in _speech(response)

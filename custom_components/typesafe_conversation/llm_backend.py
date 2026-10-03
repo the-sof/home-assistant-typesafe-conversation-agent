@@ -137,10 +137,10 @@ class LLMBackend(ABC):
     async def split_compound(self, utterance: str) -> list[str]:
         """Break a compound request into atomic commands.
 
-        Never raises. If the model is slow, unreachable, or returns something
-        that is not a JSON array, we fall back to treating the utterance as a
-        single command - which is exactly what would have happened without the
-        compound question. A failure here must not cost the user their command.
+        Never raises. If the model is slow, unreachable, returns something that
+        is not an array of commands, or more of them than we accept, the result
+        is empty and nothing runs: running the whole sentence as one command, or
+        only its first few parts, would act on a guess at what was meant.
         """
         messages = [
             {"role": "system", "content": SPLIT_SYSTEM_PROMPT},
@@ -155,20 +155,20 @@ class LLMBackend(ABC):
             )
         except LLMBackendError as err:
             LOGGER.warning("Could not split a compound request (%s)", err)
-            return [utterance]
+            return []
         _log_exchange("split", self.name, self._model, messages, raw, metrics)
 
         parts = _parse_string_array(raw)
         if not parts:
             LOGGER.warning("LLM split returned no usable array: %r", raw[:200])
-            return [utterance]
+            return []
         if len(parts) > MAX_SUB_COMMANDS:
             LOGGER.warning(
-                "LLM split produced %s parts; keeping the first %s",
+                "LLM split produced %s parts, more than the %s accepted",
                 len(parts),
                 MAX_SUB_COMMANDS,
             )
-            parts = parts[:MAX_SUB_COMMANDS]
+            return []
         LOGGER.debug("Split %r into %s", utterance, parts)
         return parts
 
@@ -476,10 +476,11 @@ def _parse_string_array(raw: str) -> list[str]:
             parsed = json.loads(candidate)
         except json.JSONDecodeError, TypeError:
             continue
-        if isinstance(parsed, list):
-            items = [p.strip() for p in parsed if isinstance(p, str) and p.strip()]
-            if items:
-                return items
+        if isinstance(parsed, list) and parsed:
+            # One unusable item means the split as a whole can't be trusted.
+            if all(isinstance(p, str) and p.strip() for p in parsed):
+                return [p.strip() for p in parsed]
+            return []
     return []
 
 
