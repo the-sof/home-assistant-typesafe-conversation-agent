@@ -195,24 +195,63 @@ def normalise_model(name: str) -> str:
     return name[: -len(":latest")] if name.endswith(":latest") else name
 
 
-def _parse_answer(key: str, payload: dict[str, Any]) -> Answer:
+def _parse_answers(payload: dict[str, Any]) -> dict[str, Answer]:
+    answers = payload.get("answers", {})
+    if not isinstance(answers, dict):
+        raise SystemOneError("Malformed answers from the server")
+    return {key: _parse_answer(key, value) for key, value in answers.items()}
+
+
+def _parse_answer(key: str, payload: Any) -> Answer:
+    """One answer, checked before the router can act on it.
+
+    A NaN confidence or a choice missing from its own distribution would
+    otherwise reach the thresholds as if it were a real judgement.
+    """
+    try:
+        return _parse_typed_answer(payload)
+    except (KeyError, TypeError, AttributeError, ValueError) as err:
+        raise SystemOneError(f"Malformed answer for {key!r}") from err
+
+
+def _parse_typed_answer(payload: dict[str, Any]) -> Answer:
     kind = payload.get("type")
     if kind == "choice":
+        probabilities = _distribution(payload["probabilities"])
+        choice = payload["choice"]
+        if not isinstance(choice, str) or choice not in probabilities:
+            raise ValueError("choice is not in its distribution")
         return ChoiceAnswer(
-            choice=payload["choice"],
-            probabilities={k: float(v) for k, v in payload["probabilities"].items()},
-            confidence=float(payload["confidence"]),
+            choice=choice,
+            probabilities=probabilities,
+            confidence=_number(payload["confidence"], probability=True),
         )
     if kind == "score":
         return ScoreAnswer(
-            score=float(payload["score"]),
+            score=_number(payload["score"]),
             legend=dict(payload.get("legend", {})),
-            probabilities={k: float(v) for k, v in payload["probabilities"].items()},
-            confidence=float(payload["confidence"]),
+            probabilities=_distribution(payload["probabilities"]),
+            confidence=_number(payload["confidence"], probability=True),
         )
     if kind == "noul":
-        return NoulAnswer(noul=float(payload["noul"]))
-    raise SystemOneError(f"Unknown answer type {kind!r} for question {key!r}")
+        return NoulAnswer(noul=_number(payload["noul"], probability=True))
+    raise ValueError(f"unknown answer type {kind!r}")
+
+
+def _distribution(raw: dict[str, Any]) -> dict[str, float]:
+    return {k: _number(v, probability=True) for k, v in raw.items()}
+
+
+def _number(value: Any, *, probability: bool = False) -> float:
+    """A finite real, and between 0 and 1 for a probability. Never a bool."""
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or (probability and not 0 <= value <= 1)
+    ):
+        raise ValueError(f"not a valid number: {value!r}")
+    return float(value)
 
 
 class SystemOneClient:
@@ -470,15 +509,19 @@ class SystemOneClient:
                 self._record_failure()
                 raise
 
+            try:
+                answers = _parse_answers(payload)
+            except SystemOneError:
+                # A malformed answer is a failure like any other: retrying the
+                # same request would not fix it, and the breaker should count it.
+                self._record_failure()
+                raise
             self._consecutive_failures = 0
             latency_ms = (time.monotonic() - started) * 1000
             usage = payload.get("usage", {})
             response = SystemOneResponse(
                 model=payload.get("model", self._model),
-                answers={
-                    key: _parse_answer(key, value)
-                    for key, value in payload.get("answers", {}).items()
-                },
+                answers=answers,
                 input_tokens=int(usage.get("input_tokens", 0)),
                 output_tokens=int(usage.get("output_tokens", 0)),
                 latency_ms=latency_ms,

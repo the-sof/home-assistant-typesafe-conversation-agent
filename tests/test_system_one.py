@@ -21,6 +21,7 @@ from custom_components.typesafe_conversation.system_one import (
     ServerProfile,
     SystemOneAuthError,
     SystemOneClient,
+    SystemOneError,
     SystemOneRequestError,
     SystemOneUnavailableError,
 )
@@ -334,3 +335,46 @@ async def test_timing_a_request_the_server_rejects_says_why(mocker):
     client = SystemOneClient(session, None, "tev1:4b", base_url=LOCAL)
     with pytest.raises(SystemOneRequestError, match="5373 tokens"):
         await client.async_time_request({}, {})
+
+
+# --- malformed answers never reach the router ---------------------------------
+
+_CHOICE = {
+    "type": "choice",
+    "choice": "light",
+    "probabilities": {"light": 0.9, "fan": 0.1},
+    "confidence": 0.8,
+}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {**_CHOICE, "confidence": float("nan")},
+        {**_CHOICE, "probabilities": {"light": 1.5, "fan": 0.1}},
+        {**_CHOICE, "choice": "switch"},
+        {k: v for k, v in _CHOICE.items() if k != "confidence"},
+        {"type": "score", "score": True, "probabilities": {}, "confidence": 0.5},
+        {"type": "noul", "noul": "0.4"},
+        {"type": "mystery"},
+        "not an object",
+    ],
+)
+def test_a_malformed_answer_is_rejected(answer):
+    from custom_components.typesafe_conversation.system_one import _parse_answer
+
+    with pytest.raises(SystemOneError, match="target_domain"):
+        _parse_answer("target_domain", answer)
+
+
+async def test_a_malformed_answer_counts_against_the_breaker(client, mocker):
+    """Not retried, but counted: a server returning garbage should trip it."""
+    mocker.post(
+        "https://api.typesafe.ai/v1/systemone",
+        json={"answers": {"q": {**_CHOICE, "choice": "switch"}}, "usage": {}},
+    )
+    with pytest.raises(SystemOneError):
+        await client.async_ask("state", {"q": {}})
+    assert mocker.call_count == 1, "the same request would fail the same way"
+    assert client._consecutive_failures == 1
+
