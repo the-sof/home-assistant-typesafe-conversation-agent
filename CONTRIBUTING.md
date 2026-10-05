@@ -23,12 +23,12 @@ public issue.
 
 ## Development setup
 
-Python 3.14 is required, because Home Assistant requires it.
+Python 3.14.2 or newer is required, because Home Assistant requires it.
 
 ```sh
 python3.14 -m venv .venv
-.venv/bin/pip install "pytest-homeassistant-custom-component==0.13.348" syrupy ruff
-.venv/bin/pip install "hassil==3.8.0" "home-assistant-intents==2026.6.24"
+.venv/bin/pip install "pytest-homeassistant-custom-component==0.13.367" syrupy ruff
+.venv/bin/pip install "gazetteer-matcher==1.1.0" "hassil==3.12.1" "home-assistant-intents==2026.8.28"
 .venv/bin/python -m pytest
 ```
 

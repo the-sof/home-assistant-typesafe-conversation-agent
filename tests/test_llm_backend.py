@@ -61,29 +61,28 @@ async def test_split_parses_the_shapes_models_actually_return(
     assert await backend.split_compound("anything") == expected
 
 
-@pytest.mark.parametrize("raw", ["I cannot do that", "", "{}", "[1, 2, 3]"])
-async def test_split_falls_back_to_the_original_utterance(session, mocker, raw):
-    """A useless split must cost the user nothing.
-
-    The request still runs as a single command, which is what would have
-    happened if the compound question had never fired.
-    """
+@pytest.mark.parametrize(
+    "raw", ["I cannot do that", "", "{}", "[1, 2, 3]", '["a", 2]', '["a", " "]']
+)
+async def test_a_useless_split_runs_nothing(session, mocker, raw):
+    """Running the sentence as one command would act on a guess."""
     backend = OllamaBackend(session, "http://ollama:11434", "qwen")
     mocker.post("http://ollama:11434/api/chat", json=_ollama(raw))
-    assert await backend.split_compound("turn on the lamp") == ["turn on the lamp"]
+    assert await backend.split_compound("turn on the lamp") == []
 
 
-async def test_split_survives_the_llm_being_down(session, mocker):
+async def test_split_with_the_llm_down_runs_nothing(session, mocker):
     backend = OllamaBackend(session, "http://ollama:11434", "qwen")
     mocker.post("http://ollama:11434/api/chat", status=500, text="boom")
-    assert await backend.split_compound("a and b") == ["a and b"]
+    assert await backend.split_compound("a and b") == []
 
 
-async def test_split_is_capped(session, mocker):
+async def test_too_many_parts_are_refused_not_truncated(session, mocker):
+    """Keeping the first six would silently drop the rest of the request."""
     backend = OllamaBackend(session, "http://ollama:11434", "qwen")
-    raw = "[" + ",".join(f'"cmd {i}"' for i in range(20)) + "]"
+    raw = "[" + ",".join(f'"cmd {i}"' for i in range(7)) + "]"
     mocker.post("http://ollama:11434/api/chat", json=_ollama(raw))
-    assert len(await backend.split_compound("x")) == 6
+    assert await backend.split_compound("x") == []
 
 
 async def test_ollama_request_shape(session, mocker):
@@ -306,3 +305,46 @@ async def test_warm_up_does_nothing_unless_opted_in(session, mocker):
     backend.keep_loaded = True
     await backend.async_warm_up()
     assert len(mocker.mock_calls) == 1
+
+
+async def _failed_answer(session, mocker, **response) -> LLMBackendError:
+    backend = OpenAICompatBackend(session, "https://x.invalid", "m", api_key="k")
+    mocker.post("https://x.invalid/v1/chat/completions", **response)
+    with pytest.raises(LLMBackendError) as caught:
+        await backend.answer_freeform(
+            "hi",
+            [],
+            home_state="",
+            local_time="10:00",
+            weekday="Monday",
+            speaker_area=None,
+        )
+    return caught.value
+
+
+async def test_an_error_body_stays_out_of_the_error(session, mocker):
+    """A server can echo the prompt back, and the prompt holds the home state."""
+    err = await _failed_answer(
+        session, mocker, status=500, text="echo: the front door is unlocked"
+    )
+    assert str(err) == "HTTP 500"
+
+
+async def test_an_unexpected_shape_is_not_dumped_into_the_error(session, mocker):
+    err = await _failed_answer(session, mocker, json={"secret": "home state"})
+    assert "home state" not in str(err)
+
+
+async def test_a_redirect_is_refused_not_followed(session, mocker):
+    err = await _failed_answer(
+        session, mocker, status=301, headers={"Location": "https://elsewhere"}
+    )
+    assert "redirected" in str(err)
+
+
+def test_the_answer_follows_the_users_language():
+    from custom_components.typesafe_conversation.llm_backend import (
+        ANSWER_SYSTEM_PROMPT,
+    )
+
+    assert "language the user spoke in" in ANSWER_SYSTEM_PROMPT

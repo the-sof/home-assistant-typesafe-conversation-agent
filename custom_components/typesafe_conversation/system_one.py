@@ -13,12 +13,14 @@ aiohttp session HA already manages keeps the integration dependency-free.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import math
 import re
 import time
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -189,30 +191,94 @@ def normalise_base_url(url: str | None) -> str:
     return (url or DEFAULT_BASE_URL).strip().rstrip("/")
 
 
+def key_would_leak(base_url: str | None, api_key: str | None) -> bool:
+    """True when a key would cross a network that is not ours in cleartext.
+
+    Plain http:// is normal for a server on the local network, and Ollama asks
+    for no key at all. A key sent to anything else over http:// can be read
+    on the way, so the setup form refuses that combination.
+    """
+    if not api_key:
+        return False
+    parts = urlsplit(normalise_base_url(base_url))
+    if parts.scheme != "http":
+        return False
+    host = (parts.hostname or "").lower()
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # A name: local only if it is localhost, mDNS, or a single label such
+        # as a Docker service. Checked after the address, since an IPv6
+        # literal has no dots either.
+        return not (host == "localhost" or host.endswith(".local") or "." not in host)
+    return not (address.is_private or address.is_loopback or address.is_link_local)
+
+
 def normalise_model(name: str) -> str:
     """Ollama lists ``nimble:latest`` for a model requested as ``nimble``."""
     name = name.strip()
     return name[: -len(":latest")] if name.endswith(":latest") else name
 
 
-def _parse_answer(key: str, payload: dict[str, Any]) -> Answer:
+def _parse_answers(payload: Any) -> dict[str, Answer]:
+    if not isinstance(payload, dict):
+        raise SystemOneError("Malformed response from the server")
+    answers = payload.get("answers", {})
+    if not isinstance(answers, dict):
+        raise SystemOneError("Malformed answers from the server")
+    return {key: _parse_answer(key, value) for key, value in answers.items()}
+
+
+def _parse_answer(key: str, payload: Any) -> Answer:
+    """One answer, checked before the router can act on it.
+
+    A NaN confidence or a choice missing from its own distribution would
+    otherwise reach the thresholds as if it were a real judgement.
+    """
+    try:
+        return _parse_typed_answer(payload)
+    except (KeyError, TypeError, AttributeError, ValueError, OverflowError) as err:
+        raise SystemOneError(f"Malformed answer for {key!r}") from err
+
+
+def _parse_typed_answer(payload: dict[str, Any]) -> Answer:
     kind = payload.get("type")
     if kind == "choice":
+        probabilities = _distribution(payload["probabilities"])
+        choice = payload["choice"]
+        if not isinstance(choice, str) or choice not in probabilities:
+            raise ValueError("choice is not in its distribution")
         return ChoiceAnswer(
-            choice=payload["choice"],
-            probabilities={k: float(v) for k, v in payload["probabilities"].items()},
-            confidence=float(payload["confidence"]),
+            choice=choice,
+            probabilities=probabilities,
+            confidence=_number(payload["confidence"], probability=True),
         )
     if kind == "score":
         return ScoreAnswer(
-            score=float(payload["score"]),
+            score=_number(payload["score"]),
             legend=dict(payload.get("legend", {})),
-            probabilities={k: float(v) for k, v in payload["probabilities"].items()},
-            confidence=float(payload["confidence"]),
+            probabilities=_distribution(payload["probabilities"]),
+            confidence=_number(payload["confidence"], probability=True),
         )
     if kind == "noul":
-        return NoulAnswer(noul=float(payload["noul"]))
-    raise SystemOneError(f"Unknown answer type {kind!r} for question {key!r}")
+        return NoulAnswer(noul=_number(payload["noul"], probability=True))
+    raise ValueError(f"unknown answer type {kind!r}")
+
+
+def _distribution(raw: dict[str, Any]) -> dict[str, float]:
+    return {k: _number(v, probability=True) for k, v in raw.items()}
+
+
+def _number(value: Any, *, probability: bool = False) -> float:
+    """A finite real, and between 0 and 1 for a probability. Never a bool."""
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or (probability and not 0 <= value <= 1)
+    ):
+        raise ValueError(f"not a valid number: {value!r}")
+    return float(value)
 
 
 class SystemOneClient:
@@ -265,8 +331,10 @@ class SystemOneClient:
             async with self._session.get(
                 self._base + MODELS_PATH,
                 headers=self._headers(),
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=API_TIMEOUT),
             ) as response:
+                _refuse_redirect(response)
                 if response.status in (401, 403):
                     raise SystemOneAuthError("The API key was rejected")
                 response.raise_for_status()
@@ -368,8 +436,10 @@ class SystemOneClient:
                 self._base + SYSTEM_ONE_PATH,
                 json=body,
                 headers=self._headers(),
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=MEASURE_TIMEOUT),
             ) as response:
+                _refuse_redirect(response)
                 if response.status != 200:
                     raise _probe_failure(response.status, await _error_detail(response))
         except SystemOneError:
@@ -400,8 +470,10 @@ class SystemOneClient:
                 self._base + SYSTEM_ONE_PATH,
                 json=body,
                 headers=self._headers(),
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=PROBE_TIMEOUT),
             ) as response:
+                _refuse_redirect(response)
                 detail = "" if response.status == 200 else await _error_detail(response)
                 return response.status, time.monotonic() - started, detail
         except aiohttp.ClientError as err:
@@ -418,6 +490,7 @@ class SystemOneClient:
                 self._base + "/api/show",
                 json={"model": model},
                 headers=self._headers(),
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=API_TIMEOUT),
             ) as response:
                 if response.status != 200:
@@ -470,15 +543,19 @@ class SystemOneClient:
                 self._record_failure()
                 raise
 
+            try:
+                answers = _parse_answers(payload)
+            except SystemOneError:
+                # A malformed answer is a failure like any other: retrying the
+                # same request would not fix it, and the breaker should count it.
+                self._record_failure()
+                raise
             self._consecutive_failures = 0
             latency_ms = (time.monotonic() - started) * 1000
             usage = payload.get("usage", {})
             response = SystemOneResponse(
                 model=payload.get("model", self._model),
-                answers={
-                    key: _parse_answer(key, value)
-                    for key, value in payload.get("answers", {}).items()
-                },
+                answers=answers,
                 input_tokens=int(usage.get("input_tokens", 0)),
                 output_tokens=int(usage.get("output_tokens", 0)),
                 latency_ms=latency_ms,
@@ -504,8 +581,10 @@ class SystemOneClient:
                 self._base + SYSTEM_ONE_PATH,
                 json=body,
                 headers=self._headers(),
+                allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=self.profile.timeout),
             ) as response:
+                _refuse_redirect(response)
                 if response.status in (401, 403):
                     raise SystemOneAuthError("The API key was rejected")
                 if response.status in _REJECTED or response.status == 404:
@@ -582,6 +661,19 @@ async def _error_detail(response: aiohttp.ClientResponse) -> str:
                 break
     status = f"HTTP {response.status}"
     return f"{text[:300]} ({status})" if text else status
+
+
+def _refuse_redirect(response: aiohttp.ClientResponse) -> None:
+    """Never follow a redirect with the API key attached.
+
+    The commonest cause is an ``http://`` URL for a server that only answers on
+    ``https://``, so say that rather than failing obscurely.
+    """
+    if 300 <= response.status < 400:
+        raise SystemOneRequestError(
+            f"The server redirected the request (HTTP {response.status}). "
+            "Check the server URL, for example http:// against https://."
+        )
 
 
 def _probe_failure(status: int, detail: str) -> SystemOneError:

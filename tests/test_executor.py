@@ -411,3 +411,155 @@ async def test_a_query_against_an_unavailable_entity_still_runs(
     )
     response = await async_execute_query(hass, plan, _input(hass))
     assert response.response_type is not intent.IntentResponseType.ERROR
+
+
+# --- relative changes start from what the devices report ----------------------
+
+
+def _device(entity_id: str, area_id: str | None = "kitchen", domain: str = "light"):
+    from custom_components.typesafe_conversation.entities import CatalogEntity
+
+    return CatalogEntity(
+        entity_id=entity_id,
+        name=entity_id,
+        aliases=(),
+        area_id=area_id,
+        area_name=area_id,
+        floor_name=None,
+        domain=domain,
+        device_class=None,
+        supported_features=0,
+    )
+
+
+def _relative(action, target, step, domain="light", **extra) -> Plan:
+    return Plan(
+        Route.COMMAND,
+        domain=domain,
+        action=action,
+        spec=spec_for(domain, action),
+        target=target,
+        relative_step=step,
+        **extra,
+    )
+
+
+async def _sent(hass, plan, entities) -> dict[str, int]:
+    """Run the plan and return the level each device was sent, by entity id."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    sent: dict[str, int] = {}
+
+    async def _record(hass, intent_type, slots, user_input):
+        value_slot = plan.spec.value_slot
+        sent[slots["name"]["value"]] = slots[value_slot]["value"]
+        return intent.IntentResponse(language="en")
+
+    with patch("custom_components.typesafe_conversation.executor._handle", _record):
+        await async_execute(
+            hass, plan, _input(hass), SimpleNamespace(entities=entities)
+        )
+    return sent
+
+
+async def test_brighter_on_an_off_light_starts_from_zero(hass: HomeAssistant):
+    lamp = _device("light.lamp")
+    hass.states.async_set("light.lamp", "off")
+    sent = await _sent(hass, _relative("brighter", Target(entity=lamp), 25), [lamp])
+    assert sent == {"light.lamp": 25}, "not 75, from an assumed 50%"
+
+
+async def test_dimmer_on_an_off_light_says_so(hass: HomeAssistant):
+    from custom_components.typesafe_conversation.executor import ExecutionError
+
+    lamp = _device("light.lamp")
+    hass.states.async_set("light.lamp", "off")
+    with pytest.raises(ExecutionError, match="already off"):
+        await _sent(hass, _relative("dimmer", Target(entity=lamp), -25), [lamp])
+
+
+@pytest.mark.parametrize(
+    ("state", "attributes"),
+    [
+        ("unavailable", {}),
+        ("on", {"brightness": float("nan")}),
+        ("on", {"brightness": True}),
+        ("on", {}),
+    ],
+)
+async def test_an_unknown_level_is_never_guessed(
+    hass: HomeAssistant, state, attributes
+):
+    from custom_components.typesafe_conversation.executor import ExecutionError
+
+    lamp = _device("light.lamp")
+    hass.states.async_set("light.lamp", state, attributes)
+    with pytest.raises(ExecutionError, match="say a value"):
+        await _sent(hass, _relative("dimmer", Target(entity=lamp), -25), [lamp])
+
+
+async def test_dimming_a_room_leaves_its_off_lights_off(hass: HomeAssistant):
+    """ "It's too bright in here": each light that is on dims from its own level."""
+    a, b = _device("light.a"), _device("light.b")
+    off, hall = _device("light.off"), _device("light.hall", "hall")
+    hass.states.async_set("light.a", "on", {"brightness": 255})
+    hass.states.async_set("light.b", "on", {"brightness": 127.5})
+    hass.states.async_set("light.off", "off")
+    hass.states.async_set("light.hall", "on", {"brightness": 255})
+
+    sent = await _sent(
+        hass,
+        _relative("dimmer", Target(area_id="kitchen", domain="light"), -25),
+        [a, b, off, hall],
+    )
+
+    assert sent == {"light.a": 75, "light.b": 25}, (
+        "the off light and the hall untouched"
+    )
+
+
+async def test_brightening_a_dark_room_turns_its_lights_on(hass: HomeAssistant):
+    a, b = _device("light.a"), _device("light.b")
+    hass.states.async_set("light.a", "off")
+    hass.states.async_set("light.b", "off")
+    sent = await _sent(
+        hass,
+        _relative("brighter", Target(area_id="kitchen", domain="light"), 25),
+        [a, b],
+    )
+    assert sent == {"light.a": 25, "light.b": 25}
+
+
+async def test_dimming_a_dark_room_says_so(hass: HomeAssistant):
+    from custom_components.typesafe_conversation.executor import ExecutionError
+
+    a = _device("light.a")
+    hass.states.async_set("light.a", "off")
+    with pytest.raises(ExecutionError, match="already off"):
+        await _sent(
+            hass,
+            _relative("dimmer", Target(area_id="kitchen", domain="light"), -25),
+            [a],
+        )
+
+
+async def test_the_speakers_room_is_a_preference_not_a_filter(hass: HomeAssistant):
+    """From a room with no thermostat, "warmer" reaches the only one there is."""
+    stat = _device("climate.stat", "hall", "climate")
+    hass.states.async_set("climate.stat", "heat", {"temperature": 20})
+    plan = _relative(
+        "warmer", Target(domain="climate"), 10, "climate", preferred_area_id="kitchen"
+    )
+    assert await _sent(hass, plan, [stat]) == {"climate.stat": 21.0}
+
+
+async def test_an_unknown_thermostat_setpoint_is_not_assumed(hass: HomeAssistant):
+    from custom_components.typesafe_conversation.executor import ExecutionError
+
+    stat = _device("climate.stat", None, "climate")
+    hass.states.async_set("climate.stat", "heat", {})
+    with pytest.raises(ExecutionError, match="say a value"):
+        await _sent(
+            hass, _relative("warmer", Target(entity=stat), 10, "climate"), [stat]
+        )

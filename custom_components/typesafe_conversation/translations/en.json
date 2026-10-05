@@ -64,7 +64,8 @@
       "invalid_auth": "That API key was rejected.",
       "cannot_connect": "Could not reach the server at that address.",
       "model_rejected": "The server can't use this model: {reason}",
-      "unknown": "Unexpected error."
+      "unknown": "Unexpected error.",
+      "insecure_key": "An API key would be sent unencrypted. Use an https:// address, or leave the key empty for a server on your own network."
     },
     "abort": {
       "reauth_successful": "Re-authentication was successful.",
