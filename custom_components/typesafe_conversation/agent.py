@@ -1080,22 +1080,29 @@ def _spoken(result: intent.IntentResponse) -> str:
 def _changes_named(
     field: ScriptField, new: Any, old: Any, said: str, areas: dict[str, str]
 ) -> bool:
-    """Whether the reply names every value the change adds.
+    """Whether the reply grounds the change in what the user said.
 
-    Several values come as a list: each added one is checked on its own, by
-    its value or its label. Removing one needs no name - "not the kitchen" is
-    a change the user made, and dropping a value never invents one.
+    Several values come as a list, and each is checked on its own, by its
+    value or its label. Every added value must be named. A removal must be
+    asked for too, or a reply that only gave the time could drop a speaker
+    chosen earlier: the reply has to name at least one value involved - "just
+    the kitchen" (kept) or "not the bedroom" (removed) both do.
     """
-    before = set(old) if isinstance(old, list) else {old}
-    added = [v for v in (new if isinstance(new, list) else [new]) if v not in before]
-    for value in added:
+
+    def named(value: Any) -> bool:
         if field.kind == "area":
             names = [str(value), areas.get(str(value), "")]
         else:
             names = field.names_for(value)
-        if not any(_said(name, said) for name in names if name):
-            return False
-    return True
+        return any(_said(name, said) for name in names if name)
+
+    after = new if isinstance(new, list) else [new]
+    before = old if isinstance(old, list) else [old]
+    added = [v for v in after if v not in before]
+    removed = [v for v in before if v not in after]
+    if not all(named(v) for v in added):
+        return False
+    return not removed or any(named(v) for v in [*after, *removed])
 
 
 def _said(name: str, text: str) -> bool:

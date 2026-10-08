@@ -461,3 +461,33 @@ async def test_several_choices_are_checked_one_by_one(hass: HomeAssistant, reply
         await _say(agent, reply)
 
     assert execute.await_args.args[1].script_data["speakers"] == used
+
+
+@pytest.mark.parametrize(
+    ("reply", "used"),
+    [
+        ("5:15", ["speaker_a", "speaker_b"]),
+        ("5:15, just the kitchen", ["speaker_a"]),
+        ("5:15, not the bedroom", ["speaker_a"]),
+    ],
+)
+async def test_a_choice_is_only_dropped_when_asked(hass: HomeAssistant, reply, used):
+    """A reply that only gives the time must not lose a speaker chosen earlier."""
+    await _scripts(hass)
+    llm = MagicMock()
+    llm.fill_fields = AsyncMock(
+        side_effect=[
+            {"location": "upstairs", "speakers": ["speaker_a", "speaker_b"]},
+            {"alarm_time": "05:15:00", "speakers": ["speaker_a"]},
+        ]
+    )
+    agent = _agent(hass, llm, {})
+    done = intent.IntentResponse(language="en")
+    done.async_set_speech("ok")
+    execute = AsyncMock(return_value=done)
+
+    await _say(agent, "set an alarm upstairs on the kitchen and bedroom speakers")
+    with patch(f"{AGENT}.async_execute", execute):
+        await _say(agent, reply)
+
+    assert execute.await_args.args[1].script_data["speakers"] == used
