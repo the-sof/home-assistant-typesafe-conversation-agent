@@ -112,7 +112,9 @@ nothing leaves the house.
 What does **not** happen: nothing is stored by this project, there is no
 telemetry of its own, and the optional LLM backend is configured separately —
 point it at Ollama on your own machine and the prose path never leaves the
-house either. Diagnostics downloads redact the API key, both server URLs and
+house either. When it fills in a [script's fields](#scripts-with-fields), the
+LLM is sent the utterance, that script's name, description and fields, the
+room you are in and the time; not the rest of the home. Diagnostics downloads redact the API key, both server URLs and
 your entity IDs.
 
 When you use TypeSafe's hosted API, its handling of what you send is governed by
@@ -241,13 +243,60 @@ and `always_confirm_risky`, `bypass_local_intents` and
 | `always_confirm_risky` | **on** | Ask before unlocking a door, opening a garage or disarming an alarm, however sure the model is. **Turning this off lets confident requests through silently** — the model's judgement becomes the only gate. |
 | `bypass_local_intents` | off | Send every command here, including ones Home Assistant's own sentence matcher recognises. Off is recommended; see [below](#leave-prefer-handling-commands-locally-on). |
 | `inline_entity_descriptions` | off | Describe every entity inside each question rather than once in the shared state. Roughly doubles the tokens. Only worth it if the agent picks the wrong device. |
-| `llm_backend` | none | `ollama`, an OpenAI-compatible endpoint, or unset. Used only for compound requests and general questions. |
-| `llm_base_url` | `http://localhost:11434` (Ollama) | Where that backend lives. Point it at your own machine to keep the prose path local. |
-| `llm_model` | — | Model name on that backend. |
+| `llm_backend` | none | `ollama`, an OpenAI-compatible endpoint, or none. Used for compound requests, general questions, and [scripts with fields](#scripts-with-fields). |
+| `llm_base_url` | `http://localhost:11434` for Ollama, `https://openrouter.ai/api` for OpenAI-compatible | Where that backend lives. For Ollama, the machine running it (`localhost` only works if Home Assistant is not in a container). For OpenRouter, a trailing `/v1` is fine. Checked before it is saved. |
+| `llm_model` | — | Model name on that backend, picked from the list the server offers. |
 | `llm_api_key` | — | If the backend needs one. Redacted in diagnostics. |
 | `llm_timeout` | `30` s | How long to wait for the LLM before giving up. Only the prose path is affected. A large local model that must load first may need more. |
 | `llm_keep_loaded` | off | Ollama only. Load the language model at startup and keep it in memory, so the first general question after a pause is fast. Holds the memory while Home Assistant runs; off leaves unloading to the server. |
 | `llm_referer`, `llm_title` | project defaults | Sent as `HTTP-Referer` and `X-Title`; OpenRouter uses them for attribution. |
+
+### Scripts with fields
+
+Scripts often take fields: an alarm script wants a time and a speaker, a
+"notify" script wants a message. The decision model picks the script; the
+[language model](#options) then fills in its fields in one short, structured
+call, and every value is checked against the field's selector before the script
+runs. Nothing is guessed: a required value the request doesn't give is asked
+for ("What time should I use?"), and the next thing you say completes it.
+Without a language model configured, a script that takes fields is not run.
+
+Write field descriptions as you would for any LLM agent; they are what the
+language model reads. For example:
+
+```yaml
+script:
+  set_alarm:
+    alias: Set an alarm
+    description: Set an alarm clock for a time of day.
+    fields:
+      alarm_time:
+        name: Time
+        description: The time of day, 24-hour.
+        required: true
+        selector:
+          time:
+      location:
+        name: Location
+        description: Which speaker. If not said, the room the user is in.
+        required: true
+        selector:
+          select:
+            options: [upstairs, downstairs]
+    sequence:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.alarm
+        data:
+          time: "{{ alarm_time }}"
+```
+
+"Wake me up at 5.15 tomorrow" from a bedroom satellite runs it with
+`alarm_time: 05:15:00` and the bedroom's speaker. If the script returns a
+`speech` or `message` string, that is what is said; otherwise the reply names
+the values it used. Most selectors work, including `select`, `number`,
+`boolean`, `time`, `date`, `duration`, `area` and `text`. Hidden (advanced)
+fields are left out.
 
 ### Leave "prefer handling commands locally" on
 

@@ -348,3 +348,119 @@ def test_the_answer_follows_the_users_language():
     )
 
     assert "language the user spoke in" in ANSWER_SYSTEM_PROMPT
+
+
+_SCHEMA = {"type": "object", "properties": {"alarm_time": {"type": "string"}}}
+
+
+async def _fill(backend):
+    return await backend.fill_fields(
+        "wake me up at 5.15",
+        title="Set an alarm",
+        description="",
+        schema=_SCHEMA,
+        speaker_area="Bedroom",
+        local_time="2026-10-07 21:00",
+        weekday="Wednesday",
+    )
+
+
+async def test_ollama_fills_fields_against_the_schema(session, mocker):
+    backend = OllamaBackend(session, "http://ollama:11434", "qwen")
+    mocker.post(
+        "http://ollama:11434/api/chat", json=_ollama('{"alarm_time": "05:15:00"}')
+    )
+    assert await _fill(backend) == {"alarm_time": "05:15:00"}
+    body = mocker.mock_calls[0][2]
+    assert body["format"] == _SCHEMA
+    assert body["options"]["temperature"] == 0.0
+
+
+async def test_an_openai_server_gets_a_json_schema(session, mocker):
+    backend = OpenAICompatBackend(session, "https://x.invalid", "m", api_key="k")
+    mocker.post(
+        "https://x.invalid/v1/chat/completions",
+        json=_openai('```json\n{"alarm_time": "05:15:00"}\n```'),
+    )
+    assert await _fill(backend) == {"alarm_time": "05:15:00"}
+    body = mocker.mock_calls[0][2]
+    assert body["response_format"]["json_schema"]["schema"] == _SCHEMA
+
+
+async def test_a_server_without_schema_support_is_asked_for_plain_json(session, mocker):
+    calls: list[dict] = []
+
+    async def _reply(method, url, body):
+        from pytest_homeassistant_custom_component.test_util.aiohttp import (
+            AiohttpClientMockResponse,
+        )
+
+        calls.append(body)
+        if "response_format" in body:
+            return AiohttpClientMockResponse(method, url, status=400, text="no")
+        return AiohttpClientMockResponse(
+            method, url, json=_openai('{"alarm_time": "05:15:00"}')
+        )
+
+    backend = OpenAICompatBackend(session, "https://x.invalid", "m", api_key="k")
+    mocker.post("https://x.invalid/v1/chat/completions", side_effect=_reply)
+    assert await _fill(backend) == {"alarm_time": "05:15:00"}
+    assert len(calls) == 2
+    assert "response_format" not in calls[1]
+
+
+async def test_a_reply_that_is_not_an_object_fills_nothing(session, mocker):
+    backend = OllamaBackend(session, "http://ollama:11434", "qwen")
+    mocker.post("http://ollama:11434/api/chat", json=_ollama("I can't do that"))
+    assert await _fill(backend) == {}
+
+
+@pytest.mark.parametrize(
+    ("backend", "pasted", "base"),
+    [
+        (
+            "openai_compatible",
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/api",
+        ),
+        (
+            "openai_compatible",
+            "https://openrouter.ai/api/v1/",
+            "https://openrouter.ai/api",
+        ),
+        (
+            "openai_compatible",
+            "https://openrouter.ai/api/v1/chat/completions",
+            "https://openrouter.ai/api",
+        ),
+        ("openai_compatible", "https://openrouter.ai/api", "https://openrouter.ai/api"),
+        ("ollama", "http://10.0.0.5:11434/api/chat", "http://10.0.0.5:11434"),
+        ("ollama", "http://10.0.0.5:11434/api", "http://10.0.0.5:11434"),
+        ("ollama", " http://10.0.0.5:11434/ ", "http://10.0.0.5:11434"),
+    ],
+)
+def test_a_pasted_address_is_trimmed_to_its_base(backend, pasted, base):
+    from custom_components.typesafe_conversation.llm_backend import normalise_llm_url
+
+    assert normalise_llm_url(backend, pasted) == base
+
+
+async def test_a_follow_up_fill_sees_what_is_settled(session, mocker):
+    backend = OllamaBackend(session, "http://ollama:11434", "qwen")
+    mocker.post("http://ollama:11434/api/chat", json=_ollama("{}"))
+    await backend.fill_fields(
+        "5:15",
+        title="Set an alarm",
+        description="",
+        schema=_SCHEMA,
+        speaker_area="Bedroom",
+        local_time="2026-10-08 21:00",
+        weekday="Thursday",
+        earlier="set an alarm downstairs",
+        known={"location": "downstairs"},
+        asking="Time",
+    )
+    request = mocker.mock_calls[0][2]["messages"][1]["content"]
+    assert 'Already settled: {"location": "downstairs"}' in request
+    assert "You asked for: Time" in request
+    assert request.endswith("Now: 5:15")

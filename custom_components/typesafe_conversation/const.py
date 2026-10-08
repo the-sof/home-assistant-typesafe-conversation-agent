@@ -86,6 +86,8 @@ user did not intend is not. Turn this off to get the pure confidence gate."""
 
 BACKEND_OLLAMA: Final = "ollama"
 BACKEND_OPENAI_COMPAT: Final = "openai_compatible"
+BACKEND_NONE: Final = "none"
+"""No language model: commands and queries only."""
 
 DEFAULT_OLLAMA_URL: Final = "http://localhost:11434"
 DEFAULT_OPENAI_COMPAT_URL: Final = "https://openrouter.ai/api"
@@ -109,6 +111,10 @@ smaller model - this path is only used for prose, so it does not need to be
 the same model you would pick for reasoning."""
 SPLIT_MAX_TOKENS: Final = 200
 ANSWER_MAX_TOKENS: Final = 180
+FILL_MAX_TOKENS: Final = 300
+"""Room for a script's field values as JSON; they are short."""
+PENDING_FILL_SECONDS: Final = 90
+"""How long the agent waits for the answer to "What time should I set it for?"."""
 ANSWER_TEMPERATURE: Final = 0.3
 MAX_SUB_COMMANDS: Final = 6
 

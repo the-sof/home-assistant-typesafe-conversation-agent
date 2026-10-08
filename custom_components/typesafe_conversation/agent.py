@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +29,7 @@ from .const import (
     DEFAULT_ALWAYS_CONFIRM_RISKY,
     LOGGER,
     MAX_HISTORY_TURNS,
+    PENDING_FILL_SECONDS,
 )
 from .entities import EntityCatalog
 from .executor import (
@@ -40,6 +42,7 @@ from .executor import (
 from .extraction import extract
 from .llm_backend import LLMBackend, LLMBackendError
 from .router import Plan, Route, route, should_try_llm_answer
+from .script_fields import ScriptField, ScriptFields, async_script_fields
 from .system_one import (
     SystemOneClient,
     SystemOneError,
@@ -125,6 +128,7 @@ class TypeSafeAgent:
         llm: LLMBackend | None,
         settings: AgentSettings,
         traces: Any = None,
+        pending_fills: dict[str, Any] | None = None,
     ) -> None:
         self.hass = hass
         self.catalog = catalog
@@ -132,6 +136,9 @@ class TypeSafeAgent:
         self.llm = llm
         self.settings = settings
         self._traces = traces
+        self._pending: dict[str, _PendingFill] = (
+            pending_fills if pending_fills is not None else {}
+        )
         self._questions_cache: tuple[int, bool, dict[str, Any]] | None = None
         self.continue_conversation = False
         """Set per request. Belongs to ConversationResult, not IntentResponse,
@@ -153,6 +160,9 @@ class TypeSafeAgent:
                 intent.IntentResponseErrorCode.NO_INTENT_MATCH,
                 "Sorry, I didn't catch that.",
             )
+
+        if (resumed := await self._resume_fill(user_input, chat_log)) is not None:
+            return resumed
 
         speaker_area_id = self._speaker_area(user_input)
         try:
@@ -243,7 +253,11 @@ class TypeSafeAgent:
         conversation.async_conversation_trace_append(
             conversation.ConversationTraceEventType.AGENT_DETAIL, record
         )
-        return await self._carry_out(plan, response, user_input, chat_log)
+        result = await self._carry_out(plan, response, user_input, chat_log)
+        # Filled while carrying out; the record is shared, so this reaches it.
+        if "script_fields" in plan.trace:
+            record["script_fields"] = plan.trace["script_fields"]
+        return result
 
     def _trace_failure(
         self,
@@ -412,6 +426,17 @@ class TypeSafeAgent:
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
     ) -> intent.IntentResponse:
+        if plan.script_data is None:
+            try:
+                filled = await self._fill(plan, user_input)
+            except _FillFailed as err:
+                return self._error(
+                    user_input,
+                    intent.IntentResponseErrorCode.FAILED_TO_HANDLE,
+                    str(err),
+                )
+            if filled is not None and filled.missing:
+                return self._ask_for_field(plan, filled, user_input, chat_log)
         try:
             response = await async_execute(self.hass, plan, user_input, self.catalog)
         except intent.MatchFailedError as err:
@@ -484,6 +509,16 @@ class TypeSafeAgent:
         )
 
         plans, unclear = self._resolve_parts(parts, results, speaker_area_id)
+        for part, plan in plans:
+            # A script with fields is filled now, so nothing runs before every
+            # part is known to be complete. Asking mid-way is not an option.
+            try:
+                filled = await self._fill(plan, _with_text(user_input, part))
+            except _FillFailed:
+                unclear.append(part)
+                continue
+            if filled is not None and filled.missing:
+                unclear.append(part)
         if unclear:
             return self._error(
                 user_input,
@@ -697,6 +732,189 @@ class TypeSafeAgent:
             )
         return self._speech(user_input, answer or "I'm not sure.")
 
+    # -- scripts with fields -------------------------------------------------
+
+    async def _fill(
+        self,
+        plan: Plan,
+        user_input: conversation.ConversationInput,
+        earlier: str | None = None,
+        known: dict[str, Any] | None = None,
+        asking: str | None = None,
+    ) -> _Filled | None:
+        """Fill the fields of the script a plan runs, if it has any.
+
+        Jev chose the script; the language model only fills in its values, in
+        one structured call, and every value is checked against the field's
+        selector before it is used. None means the plan needs no filling.
+        """
+        entity = plan.target.entity
+        if plan.domain != "script" or entity is None:
+            return None
+        fields = async_script_fields(self.hass, entity.entity_id)
+        if fields is None:
+            return None
+        if self.llm is None:
+            raise _FillFailed(
+                f"I need a language model set up to fill in the details for "
+                f"{fields.title}."
+            )
+        now = dt_util.now()
+        started = time.monotonic()
+        try:
+            raw = await self.llm.fill_fields(
+                user_input.text,
+                title=fields.title,
+                description=fields.description,
+                schema=fields.json_schema([a.area_id for a in self.catalog.areas]),
+                speaker_area=self._speaker_area_name(user_input),
+                local_time=now.strftime("%Y-%m-%d %H:%M"),
+                weekday=now.strftime("%A"),
+                earlier=earlier,
+                known=known,
+                asking=asking,
+            )
+        except LLMBackendError as err:
+            LOGGER.warning("Could not fill in %s: %s", fields.entity_id, err)
+            raise _FillFailed(
+                f"Sorry, I couldn't work out the details for {fields.title} right now."
+            ) from err
+        values, missing = fields.check(raw)
+        plan.script_service = fields.service
+        plan.script_data = values
+        plan.trace["script_fields"] = {
+            "returned": sorted(raw) if isinstance(raw, dict) else [],
+            "used": values,
+            "missing": [f.key for f in missing],
+            "latency_ms": round((time.monotonic() - started) * 1000),
+        }
+        return _Filled(fields, missing)
+
+    def _ask_for_field(
+        self,
+        plan: Plan,
+        filled: _Filled,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+        original: str | None = None,
+    ) -> intent.IntentResponse:
+        """Ask for the first missing required value, and wait for the answer."""
+        now = time.monotonic()
+        # A question nobody answered would otherwise be kept until a restart.
+        for stale in [k for k, p in self._pending.items() if p.expires < now]:
+            del self._pending[stale]
+        # The chat log's id, not the input's: a first turn arrives without one.
+        if key := chat_log.conversation_id:
+            self._pending[key] = _PendingFill(
+                plan=plan,
+                fields=filled.fields,
+                original=original or user_input.text,
+                expires=now + PENDING_FILL_SECONDS,
+            )
+        field_name = filled.missing[0].name.lower()
+        return self._speech(
+            user_input,
+            f"What {field_name} should I use?",
+            continue_conversation=True,
+        )
+
+    async def _resume_fill(
+        self, user_input: conversation.ConversationInput, chat_log: conversation.ChatLog
+    ) -> intent.IntentResponse | None:
+        """Finish a script that was waiting on a value, if this turn supplies it.
+
+        Anything else - "never mind", an unrelated question - drops the wait
+        and is handled as a new request, so the agent never gets stuck asking.
+        """
+        key = chat_log.conversation_id
+        pending = self._pending.pop(key, None) if key else None
+        if pending is None or pending.expires < time.monotonic():
+            return None
+        earlier_values = dict(pending.plan.script_data or {})
+        still_missing = [
+            f
+            for f in pending.fields.fields
+            if f.required and f.key not in earlier_values
+        ]
+        try:
+            filled = await self._fill(
+                pending.plan,
+                user_input,
+                earlier=pending.original,
+                known=earlier_values,
+                asking=still_missing[0].name if still_missing else None,
+            )
+        except _FillFailed:
+            return None
+        if filled is None:
+            return None
+        merged = self._merge_reply(
+            pending.fields, earlier_values, pending.plan.script_data or {}, user_input
+        )
+        pending.plan.script_data = merged
+        missing = [
+            f for f in pending.fields.fields if f.required and f.key not in merged
+        ]
+        if missing:
+            if merged.keys() <= earlier_values.keys():
+                # Nothing new and usable: not an answer, so a new request.
+                return None
+            # An answer, but more is needed: keep it and ask for the next one.
+            return self._ask_for_field(
+                pending.plan,
+                _Filled(pending.fields, missing),
+                user_input,
+                chat_log,
+                original=pending.original,
+            )
+        if self._traces is not None:
+            self._traces.append(
+                {
+                    "utterance": user_input.text,
+                    "device_id": user_input.device_id,
+                    "satellite_id": user_input.satellite_id,
+                    "route": "script_fields_answered",
+                    "target": pending.fields.entity_id,
+                    "script_fields": {
+                        **pending.plan.trace.get("script_fields", {}),
+                        "used": merged,
+                    },
+                }
+            )
+        return await self._run_command(pending.plan, user_input, chat_log)
+
+    def _merge_reply(
+        self,
+        fields: ScriptFields,
+        settled: dict[str, Any],
+        reply: dict[str, Any],
+        user_input: conversation.ConversationInput,
+    ) -> dict[str, Any]:
+        """The settled values, updated by what the latest reply changed.
+
+        A change of mind wins: "actually, upstairs" replaces "downstairs". But
+        a value the model worked out from a field's default looks just like
+        one the user said, so for choice and area fields - where defaults such
+        as "the room you are in" live - a settled value is only replaced when
+        the reply actually names the new one.
+        """
+        merged = dict(settled)
+        said = user_input.text.lower()
+        areas = {a.area_id: a.name for a in self.catalog.areas}
+        for field in fields.fields:
+            if field.key not in reply:
+                continue
+            new, old = reply[field.key], settled.get(field.key)
+            if (
+                field.key in settled
+                and new != old
+                and field.kind in ("select", "area")
+                and not _changes_named(field, new, old, said, areas)
+            ):
+                continue
+            merged[field.key] = new
+        return merged
+
     # -- small helpers --------------------------------------------------------
 
     def _unavailable_ids(self) -> frozenset[str]:
@@ -828,6 +1046,24 @@ _UNSPLITTABLE = (
 )
 
 
+@dataclass(slots=True)
+class _Filled:
+    fields: ScriptFields
+    missing: list[ScriptField]
+
+
+@dataclass(slots=True)
+class _PendingFill:
+    plan: Plan
+    fields: ScriptFields
+    original: str
+    expires: float
+
+
+class _FillFailed(Exception):
+    """A script's fields could not be filled. The message is what to say."""
+
+
 def _refused(result: intent.IntentResponse) -> list[str]:
     """Every device that refused, even when others in the same step did not."""
     return [
@@ -839,6 +1075,42 @@ def _refused(result: intent.IntentResponse) -> list[str]:
 
 def _spoken(result: intent.IntentResponse) -> str:
     return result.speech.get("plain", {}).get("speech", "").strip()
+
+
+def _changes_named(
+    field: ScriptField, new: Any, old: Any, said: str, areas: dict[str, str]
+) -> bool:
+    """Whether the reply grounds the change in what the user said.
+
+    Several values come as a list, and each is checked on its own, by its
+    value or its label. Every added value must be named. A removal must be
+    asked for too, or a reply that only gave the time could drop a speaker
+    chosen earlier: the reply has to name at least one value involved - "just
+    the kitchen" (kept) or "not the bedroom" (removed) both do.
+    """
+
+    def named(value: Any) -> bool:
+        if field.kind == "area":
+            names = [str(value), areas.get(str(value), "")]
+        else:
+            names = field.names_for(value)
+        return any(_said(name, said) for name in names if name)
+
+    after = new if isinstance(new, list) else [new]
+    before = old if isinstance(old, list) else [old]
+    added = [v for v in after if v not in before]
+    removed = [v for v in before if v not in after]
+    if not all(named(v) for v in added):
+        return False
+    return not removed or any(named(v) for v in [*after, *removed])
+
+
+def _said(name: str, text: str) -> bool:
+    """Whether a value's name appears in what the user said, as words."""
+    words = re.findall(r"\w+", name.lower().replace("_", " "))
+    return (
+        bool(words) and re.search(r"\b" + r"\W+".join(words) + r"\b", text) is not None
+    )
 
 
 def _same_words(a: str, b: str) -> bool:

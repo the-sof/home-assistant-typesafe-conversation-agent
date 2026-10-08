@@ -18,10 +18,16 @@ jobs:
           # Both ends of the range declared in the README. The floor job is the
           # point of the matrix: a supported version nobody runs the tests
           # against is a guess, not a claim.
+          #
+          # The labels are fixed on purpose: they are the required status
+          # checks on main, so a version in the name would block every merge
+          # after a Home Assistant bump until the branch settings were edited.
           - harness: "0.13.329"   # homeassistant 2026.5.0 - the declared floor
-            label: "HA 2026.5.0 (floor)"
+            label: "HA floor"
+            version: "2026.5.0"
           - harness: "0.13.367"   # homeassistant 2026.9.4 - current
-            label: "HA 2026.9.4 (current)"
+            label: "HA current"
+            version: "2026.9.4"
 
     name: ${{ matrix.label }}
 
@@ -32,7 +38,7 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install the harness
+      - name: Install the harness (Home Assistant ${{ matrix.version }})
         run: |
           python -m pip install --upgrade pip
           pip install "pytest-homeassistant-custom-component==${{ matrix.harness }}" syrupy

@@ -28,6 +28,7 @@ from .const import (
     ANSWER_TIMEOUT,
     BACKEND_OLLAMA,
     BACKEND_OPENAI_COMPAT,
+    FILL_MAX_TOKENS,
     LLM_KEEP_ALIVE,
     LOGGER,
     MAX_SUB_COMMANDS,
@@ -84,8 +85,30 @@ Current time: {local_time} on {weekday}. The speaker is in {speaker_area}.
 Home state:
 {home_state}"""
 
+FILL_SYSTEM_PROMPT = """\
+You fill in the details of a Home Assistant script the user asked to run.
+
+Script: {title}
+What it does: {description}
+
+Reply with one JSON object matching this JSON schema, nothing else:
+{schema}
+
+- Give a field only when the request says it, or when the field's description \
+tells you how to work it out (for example from the room the user is in).
+- Leave a field out rather than guess. Never invent a time, number or name.
+- If some values are already settled, give a settled field again only when the \
+latest reply changes it. Never fill a settled field from a field's default.
+- Times are 24-hour HH:MM:SS. "5.15 a.m." is 05:15:00, "quarter to seven in the \
+evening" is 18:45:00.
+
+The user is in: {speaker_area}
+It is now {local_time}, {weekday}.
+"""
+
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 _ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
+_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 class LLMBackendError(Exception):
@@ -122,6 +145,7 @@ class LLMBackend(ABC):
         max_tokens: int,
         temperature: float,
         timeout: float,
+        schema: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Send a chat completion.
 
@@ -206,6 +230,55 @@ class LLMBackend(ABC):
         _log_exchange("answer", self.name, self._model, messages, text, metrics)
         return text.strip()
 
+    async def fill_fields(
+        self,
+        utterance: str,
+        *,
+        title: str,
+        description: str,
+        schema: dict[str, Any],
+        speaker_area: str | None,
+        local_time: str,
+        weekday: str,
+        earlier: str | None = None,
+        known: dict[str, Any] | None = None,
+        asking: str | None = None,
+    ) -> dict[str, Any]:
+        """Fill in the fields of a script Jev already chose, as one JSON object.
+
+        Raises LLMBackendError when the model cannot be reached. A reply that is
+        not an object comes back empty, which the caller treats as nothing said.
+        """
+        system = FILL_SYSTEM_PROMPT.format(
+            title=title,
+            description=description or "No description.",
+            schema=json.dumps(schema, separators=(",", ":")),
+            speaker_area=speaker_area or "an unknown room",
+            local_time=local_time,
+            weekday=weekday,
+        )
+        lines = []
+        if earlier:
+            lines.append(f"Earlier: {earlier}")
+        if known:
+            lines.append(f"Already settled: {json.dumps(known)}")
+        if asking:
+            lines.append(f"You asked for: {asking}")
+        request = "\n".join([*lines, f"Now: {utterance}"]) if lines else utterance
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": request},
+        ]
+        raw, metrics = await self._chat(
+            messages,
+            max_tokens=FILL_MAX_TOKENS,
+            temperature=0.0,
+            timeout=self._answer_timeout,
+            schema=schema,
+        )
+        _log_exchange("fill", self.name, self._model, messages, raw, metrics)
+        return _parse_object(raw)
+
 
 class OllamaBackend(LLMBackend):
     """Ollama's native chat endpoint."""
@@ -224,6 +297,7 @@ class OllamaBackend(LLMBackend):
         max_tokens: int,
         temperature: float,
         timeout: float,
+        schema: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         payload: dict[str, Any] = {
             "model": self._model,
@@ -234,6 +308,9 @@ class OllamaBackend(LLMBackend):
         if self.keep_loaded:
             # Only on request. Otherwise the server's own idle setting decides.
             payload["keep_alive"] = LLM_KEEP_ALIVE
+        if schema is not None:
+            # Ollama constrains the reply to this JSON schema.
+            payload["format"] = schema
         headers = {}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -298,14 +375,20 @@ class OpenAICompatBackend(LLMBackend):
         max_tokens: int,
         temperature: float,
         timeout: float,
+        schema: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        payload = {
+        payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "stream": False,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if schema is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "fields", "schema": schema, "strict": False},
+            }
         headers = {}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -315,13 +398,16 @@ class OpenAICompatBackend(LLMBackend):
         if self._title:
             headers["X-Title"] = self._title
         started = time.monotonic()
-        data = await _post_json(
-            self._session,
-            f"{self._base_url}/v1/chat/completions",
-            payload,
-            headers,
-            timeout,
-        )
+        url = f"{self._base_url}/v1/chat/completions"
+        try:
+            data = await _post_json(self._session, url, payload, headers, timeout)
+        except LLMBackendError as err:
+            if "response_format" not in payload or str(err) != "HTTP 400":
+                raise
+            # Not every server or model takes a schema. The prompt carries it
+            # too, so ask once more for plain JSON.
+            del payload["response_format"]
+            data = await _post_json(self._session, url, payload, headers, timeout)
         elapsed = time.monotonic() - started
         try:
             text = data["choices"][0]["message"]["content"] or ""
@@ -479,6 +565,19 @@ async def _post_json(
         raise LLMBackendError(f"Response was not JSON: {err}") from err
 
 
+def _parse_object(raw: str) -> dict[str, Any]:
+    """The JSON object in a reply, or an empty one."""
+    found = _OBJECT_RE.search(raw)
+    for candidate in (*_candidates(raw), found.group(0) if found else ""):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError, TypeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
 def _parse_string_array(raw: str) -> list[str]:
     """Get a list of strings out of whatever the model actually returned.
 
@@ -507,6 +606,90 @@ def _candidates(raw: str):
         yield array.group(0)
 
 
+class LLMAuthError(LLMBackendError):
+    """The server refused the API key."""
+
+
+_URL_SUFFIXES = (
+    "/v1/chat/completions",
+    "/chat/completions",
+    "/api/chat",
+    "/api/tags",
+    "/v1/models",
+    "/v1",
+)
+
+
+def normalise_llm_url(backend: str, url: str) -> str:
+    """The base address, from whatever was pasted.
+
+    Each backend adds its own path (``/api/chat`` for Ollama,
+    ``/v1/chat/completions`` otherwise), so a full endpoint or a trailing
+    ``/v1`` - which is how OpenRouter documents its address - is trimmed back.
+    """
+    url = url.strip().rstrip("/")
+    for suffix in _URL_SUFFIXES:
+        if url.endswith(suffix):
+            url = url[: -len(suffix)].rstrip("/")
+            break
+    if backend == BACKEND_OLLAMA and url.endswith("/api"):
+        url = url[: -len("/api")]
+    return url
+
+
+async def async_list_models(
+    session: aiohttp.ClientSession, backend: str, base_url: str, api_key: str | None
+) -> list[str] | None:
+    """The models the server offers, or None when it does not list them.
+
+    Raises LLMAuthError for a refused key and LLMBackendError when the server
+    cannot be reached, which is what the setup form needs to tell apart.
+    """
+    path = "/api/tags" if backend == BACKEND_OLLAMA else "/v1/models"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with session.get(
+            base_url + path,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=10),
+            allow_redirects=False,
+        ) as response:
+            if response.status in (401, 403):
+                raise LLMAuthError(f"HTTP {response.status}")
+            if response.status == 404:
+                return None
+            if response.status >= 300:
+                raise LLMBackendError(f"HTTP {response.status}")
+            payload = await response.json(content_type=None)
+    except LLMBackendError:
+        raise
+    except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+        raise LLMBackendError(
+            f"Could not reach the server ({type(err).__name__})"
+        ) from err
+    if not isinstance(payload, dict):
+        return None
+    if backend == BACKEND_OLLAMA:
+        items, key = payload.get("models"), "name"
+    else:
+        items, key = payload.get("data"), "id"
+    if not isinstance(items, list):
+        return None
+    return sorted(
+        {i[key] for i in items if isinstance(i, dict) and isinstance(i.get(key), str)}
+    )
+
+
+def same_model(a: str, b: str) -> bool:
+    """Ollama lists ``qwen3:latest`` for a model asked for as ``qwen3``."""
+
+    def bare(name: str) -> str:
+        name = name.strip()
+        return name[: -len(":latest")] if name.endswith(":latest") else name
+
+    return bare(a) == bare(b)
+
+
 def create_backend(
     session: aiohttp.ClientSession, settings: dict[str, Any]
 ) -> LLMBackend | None:
@@ -533,6 +716,8 @@ def create_backend(
     model = settings.get(CONF_LLM_MODEL)
     if not backend or not base_url or not model:
         return None
+    # Entries saved before the URL was normalised may hold a pasted endpoint.
+    base_url = normalise_llm_url(backend, base_url)
 
     timeout = float(settings.get(CONF_LLM_TIMEOUT) or ANSWER_TIMEOUT)
 

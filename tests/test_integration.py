@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import aiohttp
 import pytest
 from conftest import ANSWERS
 from homeassistant.components import conversation
@@ -616,6 +617,7 @@ async def test_a_key_over_plain_http_to_a_public_server_is_refused(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):
     """The key would travel unencrypted, so it is never sent."""
+    await _setup_home(hass)
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": "user"}
     )
@@ -928,6 +930,14 @@ async def test_keeping_the_model_loaded_can_be_switched_off_again(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {CONF_MODEL: "nimble"}
     )
+    assert result["step_id"] == "llm"
+    aioclient_mock.get(
+        "http://llm.invalid:11434/api/tags", json={"models": [{"name": "a-model"}]}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "ollama"}
+    )
+    assert result["step_id"] == "llm_settings"
     llm_form = result["data_schema"].schema
     keep_default = next(k for k in llm_form if k == "llm_keep_loaded").default()
     assert keep_default is True, "the form shows what is currently set"
@@ -936,7 +946,6 @@ async def test_keeping_the_model_loaded_can_be_switched_off_again(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         {
-            "llm_backend": "ollama",
             "llm_base_url": "http://llm.invalid:11434",
             "llm_model": "a-model",
             "llm_keep_loaded": False,
@@ -948,3 +957,190 @@ async def test_keeping_the_model_loaded_can_be_switched_off_again(
     assert entry.data["llm_keep_loaded"] is False
     assert entry.data["llm_model"] == "a-model", "other LLM settings survive"
     assert _chat_calls(aioclient_mock) == [], "reloaded without a warm-up"
+
+
+# --- the language model step -----------------------------------------------------
+
+
+async def _to_llm_step(hass, aioclient_mock):
+    """An existing entry, reconfigured as far as the language model screen."""
+    await _setup_home(hass)
+    _local_server(aioclient_mock)
+    profile = ServerProfile(max_options=26, base_url=LOCAL, model="nimble")
+    entry = await _add_entry(
+        hass,
+        aioclient_mock,
+        base_url=LOCAL,
+        model="nimble",
+        server_profile=profile.as_dict(),
+    )
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_BASE_URL: LOCAL, CONF_API_TIMEOUT: profile.timeout}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_MODEL: "nimble"}
+    )
+    assert result["step_id"] == "llm"
+    return entry, result
+
+
+def _default(result, key):
+    return next(k for k in result["data_schema"].schema if k == key).default()
+
+
+async def test_openrouter_starts_from_its_own_address(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """Not the Ollama address the old single form offered for every backend."""
+    _entry, result = await _to_llm_step(hass, aioclient_mock)
+    aioclient_mock.get("https://openrouter.ai/api/v1/models", status=401)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "openai_compatible"}
+    )
+    assert result["step_id"] == "llm_settings"
+    assert _default(result, "llm_base_url") == "https://openrouter.ai/api"
+
+
+async def test_a_pasted_v1_address_is_accepted_and_trimmed(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    entry, result = await _to_llm_step(hass, aioclient_mock)
+    aioclient_mock.get(
+        "https://openrouter.ai/api/v1/models", json={"data": [{"id": "a/model"}]}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "openai_compatible"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            "llm_base_url": "https://openrouter.ai/api/v1",
+            "llm_model": "a/model",
+            "llm_api_key": "sk-or",
+        },
+    )
+    await hass.async_block_till_done()
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data["llm_base_url"] == "https://openrouter.ai/api"
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [
+        ({"status": 401}, {"base": "llm_invalid_auth"}),
+        (
+            {"json": {"data": [{"id": "other/model"}]}},
+            {"llm_model": "llm_model_not_found"},
+        ),
+    ],
+)
+async def test_the_language_model_is_checked_before_saving(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, reply, error
+):
+    _entry, result = await _to_llm_step(hass, aioclient_mock)
+    aioclient_mock.get("https://openrouter.ai/api/v1/models", **reply)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "openai_compatible"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            "llm_base_url": "https://openrouter.ai/api",
+            "llm_model": "a/model",
+            "llm_api_key": "sk-or",
+        },
+    )
+    assert result["step_id"] == "llm_settings"
+    assert result["errors"] == error
+
+
+async def test_localhost_that_cannot_be_reached_explains_containers(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    _entry, result = await _to_llm_step(hass, aioclient_mock)
+    aioclient_mock.get("http://localhost:11434/api/tags", exc=aiohttp.ClientError())
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "ollama"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"llm_base_url": "http://localhost:11434", "llm_model": "qwen3"},
+    )
+    assert result["errors"] == {"base": "llm_cannot_connect_localhost"}
+
+
+async def test_choosing_no_language_model_clears_it(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    await _setup_home(hass)
+    _local_server(aioclient_mock)
+    profile = ServerProfile(max_options=26, base_url=LOCAL, model="nimble")
+    entry = await _add_entry(
+        hass,
+        aioclient_mock,
+        base_url=LOCAL,
+        model="nimble",
+        server_profile=profile.as_dict(),
+        llm_backend="ollama",
+        llm_base_url="http://llm.invalid:11434",
+        llm_model="a-model",
+    )
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_BASE_URL: LOCAL, CONF_API_TIMEOUT: profile.timeout}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_MODEL: "nimble"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "none"}
+    )
+    await hass.async_block_till_done()
+    assert result["reason"] == "reconfigure_successful"
+    assert "llm_model" not in entry.data
+
+
+async def test_a_server_with_no_models_rejects_any_model(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """An empty list is an answer: the server has nothing to run."""
+    _entry, result = await _to_llm_step(hass, aioclient_mock)
+    aioclient_mock.get("http://ollama.box:11434/api/tags", json={"models": []})
+    aioclient_mock.get("http://localhost:11434/api/tags", json={"models": []})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "ollama"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"llm_base_url": "http://ollama.box:11434", "llm_model": "qwen3"},
+    )
+    assert result["errors"] == {"llm_model": "llm_model_not_found"}
+
+
+async def test_a_malformed_language_model_address_is_a_form_error(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    _entry, result = await _to_llm_step(hass, aioclient_mock)
+    aioclient_mock.get("http://localhost:11434/api/tags", json={"models": []})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "ollama"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"llm_base_url": "http://[::1:11434", "llm_model": "qwen3", "llm_api_key": "k"},
+    )
+    assert result["errors"] == {"base": "invalid_url"}
+
+
+async def test_a_malformed_server_address_is_a_form_error(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    await _setup_home(hass)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_BASE_URL: "http://[::1:11434", CONF_API_KEY: "k"}
+    )
+    assert result["errors"] == {"base": "invalid_url"}

@@ -425,3 +425,21 @@ def test_a_key_is_only_refused_where_it_would_cross_the_internet(url, key, leaks
     from custom_components.typesafe_conversation.system_one import key_would_leak
 
     assert key_would_leak(url, key) is leaks
+
+
+@pytest.mark.parametrize(
+    ("url", "valid"),
+    [
+        ("http://192.168.1.20:11434", True),
+        ("https://openrouter.ai/api", True),
+        ("http://[::1]:11434", True),
+        ("http://[::1:11434", False),
+        ("192.168.1.20:11434", False),
+        ("ftp://example.com", False),
+        ("", False),
+    ],
+)
+def test_a_malformed_address_is_caught(url, valid):
+    from custom_components.typesafe_conversation.system_one import valid_url
+
+    assert valid_url(url) is valid
