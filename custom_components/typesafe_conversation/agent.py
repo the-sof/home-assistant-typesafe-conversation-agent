@@ -904,18 +904,14 @@ class TypeSafeAgent:
         for field in fields.fields:
             if field.key not in reply:
                 continue
-            new = reply[field.key]
-            if field.key in settled and new != settled[field.key]:
-                if field.kind == "select":
-                    names = field.names_for(new)
-                elif field.kind == "area":
-                    names = [str(new), areas.get(str(new), "")]
-                else:
-                    names = None
-                if names is not None and not any(
-                    _said(name, said) for name in names if name
-                ):
-                    continue
+            new, old = reply[field.key], settled.get(field.key)
+            if (
+                field.key in settled
+                and new != old
+                and field.kind in ("select", "area")
+                and not _changes_named(field, new, old, said, areas)
+            ):
+                continue
             merged[field.key] = new
         return merged
 
@@ -1079,6 +1075,27 @@ def _refused(result: intent.IntentResponse) -> list[str]:
 
 def _spoken(result: intent.IntentResponse) -> str:
     return result.speech.get("plain", {}).get("speech", "").strip()
+
+
+def _changes_named(
+    field: ScriptField, new: Any, old: Any, said: str, areas: dict[str, str]
+) -> bool:
+    """Whether the reply names every value the change adds.
+
+    Several values come as a list: each added one is checked on its own, by
+    its value or its label. Removing one needs no name - "not the kitchen" is
+    a change the user made, and dropping a value never invents one.
+    """
+    before = set(old) if isinstance(old, list) else {old}
+    added = [v for v in (new if isinstance(new, list) else [new]) if v not in before]
+    for value in added:
+        if field.kind == "area":
+            names = [str(value), areas.get(str(value), "")]
+        else:
+            names = field.names_for(value)
+        if not any(_said(name, said) for name in names if name):
+            return False
+    return True
 
 
 def _said(name: str, text: str) -> bool:

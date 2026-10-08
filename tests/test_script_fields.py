@@ -49,6 +49,19 @@ ALARM = {
             "selector": {"select": {"options": ["upstairs", "downstairs"]}},
         },
         "note": {"name": "Note", "selector": {"text": {}}},
+        "speakers": {
+            "name": "Speakers",
+            "selector": {
+                "select": {
+                    "multiple": True,
+                    "options": [
+                        {"value": "speaker_a", "label": "Kitchen"},
+                        {"value": "speaker_b", "label": "Bedroom"},
+                        {"value": "speaker_c", "label": "Study"},
+                    ],
+                }
+            },
+        },
     },
     "sequence": [
         {
@@ -84,7 +97,12 @@ async def test_a_scripts_fields_are_read_from_home_assistant(hass: HomeAssistant
 
     assert fields is not None
     assert fields.title == "Set an alarm"
-    assert [f.key for f in fields.fields] == ["alarm_time", "location", "note"]
+    assert [f.key for f in fields.fields] == [
+        "alarm_time",
+        "location",
+        "note",
+        "speakers",
+    ]
     schema = fields.json_schema()
     assert schema["properties"]["location"]["enum"] == ["upstairs", "downstairs"]
     assert "required" not in schema, "a required field is asked for, never guessed"
@@ -414,3 +432,32 @@ async def test_a_changed_time_is_trusted(hass: HomeAssistant):
     done = await _say(agent, "upstairs, and make it half past")
 
     assert _speech(done) == "Alarm set for 05:30:00 upstairs."
+
+
+@pytest.mark.parametrize(
+    ("reply", "used"),
+    [
+        ("5:15, actually use Kitchen and Bedroom", ["speaker_a", "speaker_b"]),
+        ("5:15 am", ["speaker_c"]),
+    ],
+)
+async def test_several_choices_are_checked_one_by_one(hass: HomeAssistant, reply, used):
+    """Each added value is named by its label; an unnamed one keeps the old choice."""
+    await _scripts(hass)
+    llm = MagicMock()
+    llm.fill_fields = AsyncMock(
+        side_effect=[
+            {"location": "upstairs", "speakers": ["speaker_c"]},
+            {"alarm_time": "05:15:00", "speakers": ["speaker_a", "speaker_b"]},
+        ]
+    )
+    agent = _agent(hass, llm, {})
+    done = intent.IntentResponse(language="en")
+    done.async_set_speech("ok")
+    execute = AsyncMock(return_value=done)
+
+    await _say(agent, "set an alarm upstairs on the study speaker")
+    with patch(f"{AGENT}.async_execute", execute):
+        await _say(agent, reply)
+
+    assert execute.await_args.args[1].script_data["speakers"] == used
