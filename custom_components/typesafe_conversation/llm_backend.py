@@ -595,6 +595,90 @@ def _candidates(raw: str):
         yield array.group(0)
 
 
+class LLMAuthError(LLMBackendError):
+    """The server refused the API key."""
+
+
+_URL_SUFFIXES = (
+    "/v1/chat/completions",
+    "/chat/completions",
+    "/api/chat",
+    "/api/tags",
+    "/v1/models",
+    "/v1",
+)
+
+
+def normalise_llm_url(backend: str, url: str) -> str:
+    """The base address, from whatever was pasted.
+
+    Each backend adds its own path (``/api/chat`` for Ollama,
+    ``/v1/chat/completions`` otherwise), so a full endpoint or a trailing
+    ``/v1`` - which is how OpenRouter documents its address - is trimmed back.
+    """
+    url = url.strip().rstrip("/")
+    for suffix in _URL_SUFFIXES:
+        if url.endswith(suffix):
+            url = url[: -len(suffix)].rstrip("/")
+            break
+    if backend == BACKEND_OLLAMA and url.endswith("/api"):
+        url = url[: -len("/api")]
+    return url
+
+
+async def async_list_models(
+    session: aiohttp.ClientSession, backend: str, base_url: str, api_key: str | None
+) -> list[str] | None:
+    """The models the server offers, or None when it does not list them.
+
+    Raises LLMAuthError for a refused key and LLMBackendError when the server
+    cannot be reached, which is what the setup form needs to tell apart.
+    """
+    path = "/api/tags" if backend == BACKEND_OLLAMA else "/v1/models"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with session.get(
+            base_url + path,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=10),
+            allow_redirects=False,
+        ) as response:
+            if response.status in (401, 403):
+                raise LLMAuthError(f"HTTP {response.status}")
+            if response.status == 404:
+                return None
+            if response.status >= 300:
+                raise LLMBackendError(f"HTTP {response.status}")
+            payload = await response.json(content_type=None)
+    except LLMBackendError:
+        raise
+    except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+        raise LLMBackendError(
+            f"Could not reach the server ({type(err).__name__})"
+        ) from err
+    if not isinstance(payload, dict):
+        return None
+    if backend == BACKEND_OLLAMA:
+        items, key = payload.get("models"), "name"
+    else:
+        items, key = payload.get("data"), "id"
+    if not isinstance(items, list):
+        return None
+    return sorted(
+        {i[key] for i in items if isinstance(i, dict) and isinstance(i.get(key), str)}
+    )
+
+
+def same_model(a: str, b: str) -> bool:
+    """Ollama lists ``qwen3:latest`` for a model asked for as ``qwen3``."""
+
+    def bare(name: str) -> str:
+        name = name.strip()
+        return name[: -len(":latest")] if name.endswith(":latest") else name
+
+    return bare(a) == bare(b)
+
+
 def create_backend(
     session: aiohttp.ClientSession, settings: dict[str, Any]
 ) -> LLMBackend | None:
@@ -621,6 +705,8 @@ def create_backend(
     model = settings.get(CONF_LLM_MODEL)
     if not backend or not base_url or not model:
         return None
+    # Entries saved before the URL was normalised may hold a pasted endpoint.
+    base_url = normalise_llm_url(backend, base_url)
 
     timeout = float(settings.get(CONF_LLM_TIMEOUT) or ANSWER_TIMEOUT)
 

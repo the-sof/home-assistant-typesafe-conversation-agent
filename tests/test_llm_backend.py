@@ -413,3 +413,33 @@ async def test_a_reply_that_is_not_an_object_fills_nothing(session, mocker):
     backend = OllamaBackend(session, "http://ollama:11434", "qwen")
     mocker.post("http://ollama:11434/api/chat", json=_ollama("I can't do that"))
     assert await _fill(backend) == {}
+
+
+@pytest.mark.parametrize(
+    ("backend", "pasted", "base"),
+    [
+        (
+            "openai_compatible",
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/api",
+        ),
+        (
+            "openai_compatible",
+            "https://openrouter.ai/api/v1/",
+            "https://openrouter.ai/api",
+        ),
+        (
+            "openai_compatible",
+            "https://openrouter.ai/api/v1/chat/completions",
+            "https://openrouter.ai/api",
+        ),
+        ("openai_compatible", "https://openrouter.ai/api", "https://openrouter.ai/api"),
+        ("ollama", "http://10.0.0.5:11434/api/chat", "http://10.0.0.5:11434"),
+        ("ollama", "http://10.0.0.5:11434/api", "http://10.0.0.5:11434"),
+        ("ollama", " http://10.0.0.5:11434/ ", "http://10.0.0.5:11434"),
+    ],
+)
+def test_a_pasted_address_is_trimmed_to_its_base(backend, pasted, base):
+    from custom_components.typesafe_conversation.llm_backend import normalise_llm_url
+
+    assert normalise_llm_url(backend, pasted) == base

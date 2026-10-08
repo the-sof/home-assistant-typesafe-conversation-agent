@@ -86,6 +86,8 @@ user did not intend is not. Turn this off to get the pure confidence gate."""
 
 BACKEND_OLLAMA: Final = "ollama"
 BACKEND_OPENAI_COMPAT: Final = "openai_compatible"
+BACKEND_NONE: Final = "none"
+"""No language model: commands and queries only."""
 
 DEFAULT_OLLAMA_URL: Final = "http://localhost:11434"
 DEFAULT_OPENAI_COMPAT_URL: Final = "https://openrouter.ai/api"

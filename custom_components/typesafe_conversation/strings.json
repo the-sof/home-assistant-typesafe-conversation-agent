@@ -15,18 +15,9 @@
       },
       "llm": {
         "title": "Language model (optional)",
-        "description": "The decision model handles every command and query on its own. A language model is only used to split requests that contain several commands, and to answer general questions. Leave this blank to skip it.",
+        "description": "The decision model handles every command and query on its own. A language model is used to split requests that contain several commands, to answer general questions, and to fill in the details of scripts that take fields, such as the time for an alarm. Choose None to skip it.",
         "data": {
-          "llm_backend": "Backend",
-          "llm_base_url": "Base URL",
-          "llm_model": "Model",
-          "llm_api_key": "API key",
-          "llm_timeout": "Answer timeout",
-          "llm_keep_loaded": "Keep the model loaded (Ollama)"
-        },
-        "data_description": {
-          "llm_keep_loaded": "Off by default: the server decides when to unload an idle model, so the first question after a pause waits for it to load. Turn this on to load it at startup and keep it in memory, which makes that first answer fast but holds the memory for as long as Home Assistant runs. Change it any time under Reconfigure. Has no effect on hosted backends.",
-          "llm_timeout": "How long to wait for an answer. A large local model that has to load first may need more than the default."
+          "llm_backend": "Backend"
         }
       },
       "reauth_confirm": {
@@ -58,6 +49,23 @@
       "tested": {
         "title": "Server tested",
         "description": "{model} answered a typical request from this home in {typical} s, and took {cold} s when it first had to load. Requests will time out after {timeout} s; you can change that under Reconfigure.\n\nThe integration never asks the server to keep this decision model loaded. If your server unloads it when idle, the next request takes about {cold} s longer.\n\nA voice assistant starts to feel slow above about 2 seconds. If this is too slow, a smaller model, faster hardware or TypeSafe's hosted API will do better."
+      },
+      "llm_settings": {
+        "title": "Language model settings",
+        "description": "Ollama: the machine running it, on port 11434, for example {ollama_example}. localhost only works when Ollama runs on the same machine and Home Assistant is not in a container.\n\nOpenAI-compatible: the server's base address, for example {openrouter_example} for OpenRouter. A trailing /v1 or a full endpoint is fine; it is trimmed.",
+        "data": {
+          "llm_base_url": "Base URL",
+          "llm_model": "Model",
+          "llm_api_key": "API key",
+          "llm_timeout": "Answer timeout",
+          "llm_keep_loaded": "Keep the model loaded (Ollama)"
+        },
+        "data_description": {
+          "llm_model": "Picked from what the server offers, when it lists its models.",
+          "llm_api_key": "Needed for OpenRouter and other hosted services. Ollama needs none.",
+          "llm_keep_loaded": "Off by default: the server decides when to unload an idle model, so the first question after a pause waits for it to load. Turn this on to load it at startup and keep it in memory, which makes that first answer fast but holds the memory for as long as Home Assistant runs. Change it any time under Reconfigure. Has no effect on hosted backends.",
+          "llm_timeout": "How long to wait for an answer. A large local model that has to load first may need more than the default."
+        }
       }
     },
     "error": {
@@ -65,7 +73,11 @@
       "cannot_connect": "Could not reach the server at that address.",
       "model_rejected": "The server can't use this model: {reason}",
       "unknown": "Unexpected error.",
-      "insecure_key": "An API key would be sent unencrypted. Use an https:// address, or leave the key empty for a server on your own network."
+      "insecure_key": "An API key would be sent unencrypted. Use an https:// address, or leave the key empty for a server on your own network.",
+      "llm_cannot_connect": "Could not reach the language model at that address.",
+      "llm_cannot_connect_localhost": "Could not reach the language model at localhost. If Home Assistant runs in a container, localhost is the container itself: use the address of the machine running the model.",
+      "llm_invalid_auth": "The language model server rejected that API key.",
+      "llm_model_not_found": "The server doesn't offer that model. Pick one from the list."
     },
     "abort": {
       "reauth_successful": "Re-authentication was successful.",

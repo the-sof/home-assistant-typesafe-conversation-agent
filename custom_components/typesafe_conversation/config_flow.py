@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any, override
+from urllib.parse import urlsplit
 
 import voluptuous as vol
 from homeassistant.config_entries import (
@@ -30,6 +32,7 @@ from homeassistant.helpers.selector import (
 from .agent import build_request
 from .const import (
     ANSWER_TIMEOUT,
+    BACKEND_NONE,
     BACKEND_OLLAMA,
     BACKEND_OPENAI_COMPAT,
     CONF_ALWAYS_CONFIRM_RISKY,
@@ -51,12 +54,20 @@ from .const import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
     DEFAULT_OLLAMA_URL,
+    DEFAULT_OPENAI_COMPAT_URL,
     DOMAIN,
     LOGGER,
     MEASURE_UTTERANCE,
     TYPESAFE_CONSOLE_URL,
 )
 from .entities import EntityCatalog
+from .llm_backend import (
+    LLMAuthError,
+    LLMBackendError,
+    async_list_models,
+    normalise_llm_url,
+    same_model,
+)
 from .system_one import (
     ServerProfile,
     SystemOneAuthError,
@@ -100,15 +111,26 @@ _LLM_KEYS = (
 )
 
 
-def _llm_schema(current: dict[str, Any]) -> vol.Schema:
-    """The optional LLM, prefilled with what is set when reconfiguring."""
+_LLM_DEFAULT_URL = {
+    BACKEND_OLLAMA: DEFAULT_OLLAMA_URL,
+    BACKEND_OPENAI_COMPAT: DEFAULT_OPENAI_COMPAT_URL,
+}
+_LLM_EXAMPLES = {
+    "ollama_example": "http://192.168.1.20:11434",
+    "openrouter_example": DEFAULT_OPENAI_COMPAT_URL,
+}
+
+
+def _llm_backend_schema(current: dict[str, Any]) -> vol.Schema:
+    """Which language model, if any. Its settings follow on the next screen."""
     return vol.Schema(
         {
-            vol.Optional(
-                CONF_LLM_BACKEND, default=current.get(CONF_LLM_BACKEND, BACKEND_OLLAMA)
+            vol.Required(
+                CONF_LLM_BACKEND, default=current.get(CONF_LLM_BACKEND, BACKEND_NONE)
             ): SelectSelector(
                 SelectSelectorConfig(
                     options=[
+                        SelectOptionDict(value=BACKEND_NONE, label="None"),
                         SelectOptionDict(value=BACKEND_OLLAMA, label="Ollama"),
                         SelectOptionDict(
                             value=BACKEND_OPENAI_COMPAT,
@@ -117,30 +139,57 @@ def _llm_schema(current: dict[str, Any]) -> vol.Schema:
                     ]
                 )
             ),
-            vol.Optional(
-                CONF_LLM_BASE_URL,
-                default=current.get(CONF_LLM_BASE_URL, DEFAULT_OLLAMA_URL),
-            ): TextSelector(),
-            vol.Optional(
-                CONF_LLM_MODEL,
-                description={"suggested_value": current.get(CONF_LLM_MODEL)},
-            ): TextSelector(),
-            vol.Optional(
-                CONF_LLM_API_KEY,
-                description={"suggested_value": current.get(CONF_LLM_API_KEY)},
-            ): _PASSWORD,
-            vol.Optional(
-                CONF_LLM_TIMEOUT,
-                default=current.get(CONF_LLM_TIMEOUT, ANSWER_TIMEOUT),
-            ): NumberSelector(
-                NumberSelectorConfig(min=5, max=180, step=5, unit_of_measurement="s")
-            ),
-            vol.Optional(
-                CONF_LLM_KEEP_LOADED,
-                default=current.get(CONF_LLM_KEEP_LOADED, False),
-            ): BooleanSelector(),
         }
     )
+
+
+def _llm_settings_schema(
+    backend: str, current: dict[str, Any], models: list[str] | None
+) -> vol.Schema:
+    """The chosen backend's settings, with its own default address.
+
+    A setting saved for the other backend is not reused: an Ollama address
+    makes no sense as an OpenRouter one.
+    """
+    same = current.get(CONF_LLM_BACKEND) == backend
+    url = current.get(CONF_LLM_BASE_URL) if same else None
+    model = current.get(CONF_LLM_MODEL) if same else None
+    fields: dict[vol.Marker, Any] = {
+        vol.Required(
+            CONF_LLM_BASE_URL, default=url or _LLM_DEFAULT_URL[backend]
+        ): TextSelector(),
+        vol.Required(
+            CONF_LLM_MODEL, description={"suggested_value": model}
+        ): SelectSelector(
+            SelectSelectorConfig(options=models or [], custom_value=True, sort=True)
+        )
+        if models
+        else TextSelector(),
+        vol.Optional(
+            CONF_LLM_API_KEY,
+            description={
+                "suggested_value": current.get(CONF_LLM_API_KEY) if same else None
+            },
+        ): _PASSWORD,
+        vol.Optional(
+            CONF_LLM_TIMEOUT,
+            default=current.get(CONF_LLM_TIMEOUT, ANSWER_TIMEOUT),
+        ): NumberSelector(
+            NumberSelectorConfig(min=5, max=180, step=5, unit_of_measurement="s")
+        ),
+    }
+    if backend == BACKEND_OLLAMA:
+        fields[
+            vol.Optional(
+                CONF_LLM_KEEP_LOADED,
+                default=bool(current.get(CONF_LLM_KEEP_LOADED)) if same else False,
+            )
+        ] = BooleanSelector()
+    return vol.Schema(fields)
+
+
+def _is_localhost(url: str) -> bool:
+    return (urlsplit(url).hostname or "") in ("localhost", "127.0.0.1", "::1")
 
 
 class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -161,6 +210,7 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
         self._probe_error: str | None = None
         self._reconfiguring = False
         self._timeout_prefill: float | None = None
+        self._llm_backend: str = BACKEND_OLLAMA
 
     def _client(self, model: str | None = None) -> SystemOneClient:
         return SystemOneClient(
@@ -343,34 +393,99 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_llm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Configure the LLM used for compound splits and prose answers.
+        """Choose the language model, if any.
 
-        Optional: without it the agent still handles every command and query,
-        it just cannot split compound requests or answer general questions.
+        Optional: without it the agent still handles every command and query.
+        It is what splits requests with several commands, answers general
+        questions, and fills in the details of scripts that take fields.
         """
         if user_input is not None:
-            # Replace rather than merge, so clearing a field (or switching
-            # keep-loaded off) on reconfigure actually takes effect.
-            for key in _LLM_KEYS:
-                self._data.pop(key, None)
-            self._data.update(
-                {k: v for k, v in user_input.items() if v not in (None, "")}
-            )
-            if self._reconfiguring:
-                return await self.async_step_finish()
-            return self.async_create_entry(
-                title="TypeSafe Conversation",
-                data=self._data,
-                subentries=[
-                    {
-                        "subentry_type": "conversation",
-                        "title": "TypeSafe Conversation",
-                        "data": {},
-                        "unique_id": None,
-                    }
-                ],
-            )
-        return self.async_show_form(step_id="llm", data_schema=_llm_schema(self._data))
+            backend = user_input[CONF_LLM_BACKEND]
+            if backend == BACKEND_NONE:
+                for key in _LLM_KEYS:
+                    self._data.pop(key, None)
+                return await self._async_save()
+            self._llm_backend = backend
+            return await self.async_step_llm_settings()
+        return self.async_show_form(
+            step_id="llm", data_schema=_llm_backend_schema(self._data)
+        )
+
+    async def async_step_llm_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """The chosen backend's address, model and key, checked before saving."""
+        backend = self._llm_backend
+        errors: dict[str, str] = {}
+        models: list[str] | None = None
+        if user_input is not None:
+            url = normalise_llm_url(backend, user_input[CONF_LLM_BASE_URL])
+            key = user_input.get(CONF_LLM_API_KEY) or None
+            if key_would_leak(url, key):
+                errors["base"] = "insecure_key"
+            else:
+                try:
+                    models = await async_list_models(
+                        async_get_clientsession(self.hass), backend, url, key
+                    )
+                except LLMAuthError:
+                    errors["base"] = "llm_invalid_auth"
+                except LLMBackendError:
+                    errors["base"] = (
+                        "llm_cannot_connect_localhost"
+                        if _is_localhost(url)
+                        else "llm_cannot_connect"
+                    )
+            model = user_input[CONF_LLM_MODEL]
+            if not errors and models and not any(same_model(model, m) for m in models):
+                errors[CONF_LLM_MODEL] = "llm_model_not_found"
+            if not errors:
+                # Replace rather than merge, so clearing a field (or switching
+                # keep-loaded off) on reconfigure actually takes effect.
+                for k in _LLM_KEYS:
+                    self._data.pop(k, None)
+                self._data.update(
+                    {k: v for k, v in user_input.items() if v not in (None, "")}
+                )
+                self._data[CONF_LLM_BACKEND] = backend
+                self._data[CONF_LLM_BASE_URL] = url
+                return await self._async_save()
+        else:
+            # Best effort: fill the model list from the default address, so the
+            # common case is a pick rather than typing a name.
+            with contextlib.suppress(LLMBackendError):
+                same = self._data.get(CONF_LLM_BACKEND) == backend
+                models = await async_list_models(
+                    async_get_clientsession(self.hass),
+                    backend,
+                    (same and self._data.get(CONF_LLM_BASE_URL))
+                    or _LLM_DEFAULT_URL[backend],
+                    (same and self._data.get(CONF_LLM_API_KEY)) or None,
+                )
+        return self.async_show_form(
+            step_id="llm_settings",
+            data_schema=self.add_suggested_values_to_schema(
+                _llm_settings_schema(backend, self._data, models), user_input or {}
+            ),
+            errors=errors,
+            description_placeholders=_LLM_EXAMPLES,
+        )
+
+    async def _async_save(self) -> ConfigFlowResult:
+        if self._reconfiguring:
+            return await self.async_step_finish()
+        return self.async_create_entry(
+            title="TypeSafe Conversation",
+            data=self._data,
+            subentries=[
+                {
+                    "subentry_type": "conversation",
+                    "title": "TypeSafe Conversation",
+                    "data": {},
+                    "unique_id": None,
+                }
+            ],
+        )
 
     @override
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
