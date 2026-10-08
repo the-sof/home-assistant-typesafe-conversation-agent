@@ -147,18 +147,19 @@ def test_nothing_dead_ends(slug, scripted):
     assert plan.route in DECIDED, f"{slug}: {plan.reason} / {plan.trace}"
 
 
-def test_a_two_option_action_choice_is_still_trusted(scripted):
-    """The reason the action gate reads probability, not confidence."""
+def test_a_confident_routine_is_run_without_a_vote_on_the_action(scripted):
+    """A routine can only be run; once the target is solid, run it.
+
+    The action question still goes out, but for a single-action domain it can
+    only lose a good answer, as it did when "wake me up at 5:15" picked the
+    alarm script at 0.96 and then split "run" 45/55.
+    """
     plan = scripted("start_the_bedtime_routine")
     assert plan.route is Route.COMMAND
     assert plan.domain == "script"
+    assert plan.action == "run"
     assert plan.target.entity.entity_id == "script.routine_bedtime"
-
-    # Show the arithmetic the gate has to survive: a two-option Choice scores
-    # far lower confidence than a large one at the same probability.
-    answer = plan.trace["action"]
-    assert answer["choice"] == "run"
-    assert answer["top"]["run"] >= 0.55
+    assert plan.trace["action"] == "implied"
 
 
 def test_list_items_come_from_a_span_not_the_model(scripted):

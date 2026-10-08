@@ -146,6 +146,10 @@ def _solid(answer: ChoiceAnswer | None, threshold: float) -> bool:
     )
 
 
+_ONLY_ACTION: dict[str, str] = {"script": "run", "scene": "activate", "button": "press"}
+"""Domains with a single possible action, which a solid target implies."""
+
+
 def route(
     response: SystemOneResponse,
     *,
@@ -352,23 +356,41 @@ def _plan_command(  # noqa: C901 - one decision tree, kept in one place on purpo
         )
 
     # -- 5b. what to do, read from that domain's branch only ------------------
-    action_answer = response.choice(Q.action_question_id(domain))
-    trace["action"] = _describe(action_answer)
-    if action_answer is None:
-        return Plan(
-            Route.FALLBACK, reason=f"no action answer for {domain}", trace=trace
-        )
-    action_probability = action_answer.probabilities.get(action_answer.choice, 0.0)
     if (
-        action_answer.choice == Q.NOT_TARGETED
-        or action_probability < T_ACTION_PROBABILITY
+        (implied := _ONLY_ACTION.get(domain)) is not None
+        and entity is not None
+        and entity.domain == domain
+        and _solid(target_entity, T_ENTITY)
     ):
-        return Plan(
-            Route.FALLBACK,
-            reason=f"action_{domain}={action_answer.choice} p={action_probability:.2f}",
-            trace=trace,
-        )
-    action = action_answer.choice
+        # A routine, scene or button can only be run. Once the model is sure
+        # which one, a second vote on "what to do" can only lose it: "wake me
+        # up at 5:15" names script.set_alarm at 0.96 yet splits the action
+        # question 55/45, because waking up doesn't sound like running a routine.
+        action = implied
+        # Its certainty is the target's: there was nothing else to decide.
+        action_probability = action_confidence = target_entity.confidence
+        trace["action"] = "implied"
+    else:
+        action_answer = response.choice(Q.action_question_id(domain))
+        trace["action"] = _describe(action_answer)
+        if action_answer is None:
+            return Plan(
+                Route.FALLBACK, reason=f"no action answer for {domain}", trace=trace
+            )
+        action_probability = action_answer.probabilities.get(action_answer.choice, 0.0)
+        action_confidence = action_answer.confidence
+        if (
+            action_answer.choice == Q.NOT_TARGETED
+            or action_probability < T_ACTION_PROBABILITY
+        ):
+            return Plan(
+                Route.FALLBACK,
+                reason=(
+                    f"action_{domain}={action_answer.choice} p={action_probability:.2f}"
+                ),
+                trace=trace,
+            )
+        action = action_answer.choice
 
     spec = spec_for(domain, action)
     if spec is None:
@@ -525,7 +547,7 @@ def _plan_command(  # noqa: C901 - one decision tree, kept in one place on purpo
         )
         if (
             always_confirm_risky
-            or action_answer.confidence < T_RISKY_ACTION
+            or action_confidence < T_RISKY_ACTION
             or target_conf < T_RISKY_TARGET
         ):
             plan.route = Route.CONFIRM
