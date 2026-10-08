@@ -617,6 +617,7 @@ async def test_a_key_over_plain_http_to_a_public_server_is_refused(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):
     """The key would travel unencrypted, so it is never sent."""
+    await _setup_home(hass)
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": "user"}
     )
@@ -1135,6 +1136,7 @@ async def test_a_malformed_language_model_address_is_a_form_error(
 async def test_a_malformed_server_address_is_a_form_error(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):
+    await _setup_home(hass)
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": "user"}
     )
