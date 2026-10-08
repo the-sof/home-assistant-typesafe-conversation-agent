@@ -739,6 +739,8 @@ class TypeSafeAgent:
         plan: Plan,
         user_input: conversation.ConversationInput,
         earlier: str | None = None,
+        known: dict[str, Any] | None = None,
+        asking: str | None = None,
     ) -> _Filled | None:
         """Fill the fields of the script a plan runs, if it has any.
 
@@ -769,6 +771,8 @@ class TypeSafeAgent:
                 local_time=now.strftime("%Y-%m-%d %H:%M"),
                 weekday=now.strftime("%A"),
                 earlier=earlier,
+                known=known,
+                asking=asking,
             )
         except LLMBackendError as err:
             LOGGER.warning("Could not fill in %s: %s", fields.entity_id, err)
@@ -827,15 +831,26 @@ class TypeSafeAgent:
         if pending is None or pending.expires < time.monotonic():
             return None
         earlier_values = dict(pending.plan.script_data or {})
+        still_missing = [
+            f
+            for f in pending.fields.fields
+            if f.required and f.key not in earlier_values
+        ]
         try:
             filled = await self._fill(
-                pending.plan, user_input, earlier=pending.original
+                pending.plan,
+                user_input,
+                earlier=pending.original,
+                known=earlier_values,
+                asking=still_missing[0].name if still_missing else None,
             )
         except _FillFailed:
             return None
         if filled is None:
             return None
-        merged = {**earlier_values, **(pending.plan.script_data or {})}
+        merged = self._merge_reply(
+            pending.fields, earlier_values, pending.plan.script_data or {}, user_input
+        )
         pending.plan.script_data = merged
         missing = [
             f for f in pending.fields.fields if f.required and f.key not in merged
@@ -867,6 +882,42 @@ class TypeSafeAgent:
                 }
             )
         return await self._run_command(pending.plan, user_input, chat_log)
+
+    def _merge_reply(
+        self,
+        fields: ScriptFields,
+        settled: dict[str, Any],
+        reply: dict[str, Any],
+        user_input: conversation.ConversationInput,
+    ) -> dict[str, Any]:
+        """The settled values, updated by what the latest reply changed.
+
+        A change of mind wins: "actually, upstairs" replaces "downstairs". But
+        a value the model worked out from a field's default looks just like
+        one the user said, so for choice and area fields - where defaults such
+        as "the room you are in" live - a settled value is only replaced when
+        the reply actually names the new one.
+        """
+        merged = dict(settled)
+        said = user_input.text.lower()
+        areas = {a.area_id: a.name for a in self.catalog.areas}
+        for field in fields.fields:
+            if field.key not in reply:
+                continue
+            new = reply[field.key]
+            if field.key in settled and new != settled[field.key]:
+                if field.kind == "select":
+                    names = field.names_for(new)
+                elif field.kind == "area":
+                    names = [str(new), areas.get(str(new), "")]
+                else:
+                    names = None
+                if names is not None and not any(
+                    _said(name, said) for name in names if name
+                ):
+                    continue
+            merged[field.key] = new
+        return merged
 
     # -- small helpers --------------------------------------------------------
 
@@ -1028,6 +1079,14 @@ def _refused(result: intent.IntentResponse) -> list[str]:
 
 def _spoken(result: intent.IntentResponse) -> str:
     return result.speech.get("plain", {}).get("speech", "").strip()
+
+
+def _said(name: str, text: str) -> bool:
+    """Whether a value's name appears in what the user said, as words."""
+    words = re.findall(r"\w+", name.lower().replace("_", " "))
+    return (
+        bool(words) and re.search(r"\b" + r"\W+".join(words) + r"\b", text) is not None
+    )
 
 
 def _same_words(a: str, b: str) -> bool:

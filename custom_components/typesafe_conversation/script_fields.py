@@ -42,6 +42,15 @@ class ScriptField:
         raw = (self.selector_config or {}).get("select", {}).get("options") or []
         return [o["value"] if isinstance(o, dict) else str(o) for o in raw]
 
+    def names_for(self, value: Any) -> list[str]:
+        """How a user could say this select value: the value and its label."""
+        raw = (self.selector_config or {}).get("select", {}).get("options") or []
+        names = [str(value)]
+        for option in raw:
+            if isinstance(option, dict) and option.get("value") == value:
+                names.append(str(option.get("label") or ""))
+        return [n for n in names if n]
+
     def json_schema(self, area_ids: list[str] | None = None) -> dict[str, Any]:
         """What the language model is asked to produce for this field."""
         if self.kind == "area" and area_ids:

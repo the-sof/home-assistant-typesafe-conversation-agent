@@ -443,3 +443,24 @@ def test_a_pasted_address_is_trimmed_to_its_base(backend, pasted, base):
     from custom_components.typesafe_conversation.llm_backend import normalise_llm_url
 
     assert normalise_llm_url(backend, pasted) == base
+
+
+async def test_a_follow_up_fill_sees_what_is_settled(session, mocker):
+    backend = OllamaBackend(session, "http://ollama:11434", "qwen")
+    mocker.post("http://ollama:11434/api/chat", json=_ollama("{}"))
+    await backend.fill_fields(
+        "5:15",
+        title="Set an alarm",
+        description="",
+        schema=_SCHEMA,
+        speaker_area="Bedroom",
+        local_time="2026-10-08 21:00",
+        weekday="Thursday",
+        earlier="set an alarm downstairs",
+        known={"location": "downstairs"},
+        asking="Time",
+    )
+    request = mocker.mock_calls[0][2]["messages"][1]["content"]
+    assert 'Already settled: {"location": "downstairs"}' in request
+    assert "You asked for: Time" in request
+    assert request.endswith("Now: 5:15")

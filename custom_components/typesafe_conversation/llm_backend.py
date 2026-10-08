@@ -97,6 +97,8 @@ Reply with one JSON object matching this JSON schema, nothing else:
 - Give a field only when the request says it, or when the field's description \
 tells you how to work it out (for example from the room the user is in).
 - Leave a field out rather than guess. Never invent a time, number or name.
+- If some values are already settled, give a settled field again only when the \
+latest reply changes it. Never fill a settled field from a field's default.
 - Times are 24-hour HH:MM:SS. "5.15 a.m." is 05:15:00, "quarter to seven in the \
 evening" is 18:45:00.
 
@@ -239,6 +241,8 @@ class LLMBackend(ABC):
         local_time: str,
         weekday: str,
         earlier: str | None = None,
+        known: dict[str, Any] | None = None,
+        asking: str | None = None,
     ) -> dict[str, Any]:
         """Fill in the fields of a script Jev already chose, as one JSON object.
 
@@ -253,7 +257,14 @@ class LLMBackend(ABC):
             local_time=local_time,
             weekday=weekday,
         )
-        request = f"Earlier: {earlier}\nNow: {utterance}" if earlier else utterance
+        lines = []
+        if earlier:
+            lines.append(f"Earlier: {earlier}")
+        if known:
+            lines.append(f"Already settled: {json.dumps(known)}")
+        if asking:
+            lines.append(f"You asked for: {asking}")
+        request = "\n".join([*lines, f"Now: {utterance}"]) if lines else utterance
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": request},

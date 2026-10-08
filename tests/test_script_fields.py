@@ -357,3 +357,60 @@ async def test_an_unanswered_question_is_forgotten_in_time(hass: HomeAssistant):
 
     assert "long-gone" not in pending
     assert "c1" in pending
+
+
+async def test_a_default_cannot_replace_what_the_user_said(hass: HomeAssistant):
+    """ "downstairs" stays when a later fill only guesses the current room."""
+    await _scripts(hass)
+    llm = MagicMock()
+    llm.fill_fields = AsyncMock(
+        side_effect=[
+            {"location": "downstairs"},
+            {"alarm_time": "05:15:00", "location": "upstairs"},
+        ]
+    )
+    agent = _agent(hass, llm, {})
+
+    await _say(agent, "set an alarm downstairs")
+    done = await _say(agent, "5:15 am")
+
+    assert _speech(done) == "Alarm set for 05:15:00 downstairs."
+    kwargs = llm.fill_fields.await_args.kwargs
+    assert kwargs["known"] == {"location": "downstairs"}
+    assert kwargs["asking"] == "Time"
+
+
+async def test_a_change_of_mind_wins(hass: HomeAssistant):
+    """ "Actually, upstairs" replaces the settled "downstairs"."""
+    await _scripts(hass)
+    llm = MagicMock()
+    llm.fill_fields = AsyncMock(
+        side_effect=[
+            {"location": "downstairs"},
+            {"alarm_time": "05:15:00", "location": "upstairs"},
+        ]
+    )
+    agent = _agent(hass, llm, {})
+
+    await _say(agent, "set an alarm downstairs")
+    done = await _say(agent, "5:15 am, actually upstairs")
+
+    assert _speech(done) == "Alarm set for 05:15:00 upstairs."
+
+
+async def test_a_changed_time_is_trusted(hass: HomeAssistant):
+    """A time can't come from a default, so the model's change is taken."""
+    await _scripts(hass)
+    llm = MagicMock()
+    llm.fill_fields = AsyncMock(
+        side_effect=[
+            {"alarm_time": "05:00:00"},
+            {"alarm_time": "05:30:00", "location": "upstairs"},
+        ]
+    )
+    agent = _agent(hass, llm, {})
+
+    await _say(agent, "set an alarm for 5")
+    done = await _say(agent, "upstairs, and make it half past")
+
+    assert _speech(done) == "Alarm set for 05:30:00 upstairs."
