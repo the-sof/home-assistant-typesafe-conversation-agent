@@ -67,6 +67,10 @@ class TypeSafeRuntimeData:
     there is no websocket command and no UI - so they are write-only. Keeping
     our own ring buffer is what makes the diagnostics download useful."""
 
+    pending_fills: dict[str, Any] = field(default_factory=dict)
+    """Scripts waiting on a missing field, by conversation id: the answer to
+    "What time should I use?" arrives as a separate turn."""
+
 
 type TypeSafeConfigEntry = ConfigEntry[TypeSafeRuntimeData]
 

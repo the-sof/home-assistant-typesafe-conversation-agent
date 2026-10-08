@@ -21,6 +21,7 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import intent
 
 from .actions import (
@@ -35,6 +36,7 @@ from .actions import (
 from .const import CONVERSATION_DOMAIN, DOMAIN, LOGGER
 from .entities import CONTROLLABLE_DOMAINS, CatalogEntity, EntityCatalog
 from .router import Plan, Target
+from .script_fields import describe_values
 
 
 class ExecutionError(Exception):
@@ -119,6 +121,8 @@ async def async_execute(
     """Carry out a COMMAND plan."""
     if plan.target.whole_house and plan.target.domain is None:
         return await _execute_whole_house(hass, plan, user_input, catalog)
+    if plan.script_data is not None and plan.script_service is not None:
+        return await _run_script(hass, plan, user_input)
     if (
         plan.spec is not None
         and plan.spec.relative
@@ -309,6 +313,45 @@ def _finite(value: Any) -> bool:
         and not isinstance(value, bool)
         and math.isfinite(value)
     )
+
+
+async def _run_script(
+    hass: HomeAssistant, plan: Plan, user_input: conversation.ConversationInput
+) -> intent.IntentResponse:
+    """Call a script with its field values; the turn-on intent cannot pass them."""
+    entity = plan.target.entity
+    title = entity.name if entity is not None else plan.script_service
+    try:
+        result = await hass.services.async_call(
+            "script",
+            plan.script_service,
+            plan.script_data,
+            blocking=True,
+            return_response=True,
+            context=user_input.context,
+        )
+    except HomeAssistantError as err:
+        # ServiceValidationError included: the script refused these values.
+        raise ExecutionError(f"{title} didn't run: {err}") from err
+
+    response = intent.IntentResponse(language=user_input.language)
+    if entity is not None:
+        response.async_set_results(success_results=[_entity_target(entity)])
+    said = None
+    if isinstance(result, dict):
+        said = next(
+            (
+                result[k]
+                for k in ("speech", "message")
+                if isinstance(result.get(k), str)
+            ),
+            None,
+        )
+    if said is None:
+        values = describe_values(plan.script_data or {})
+        said = f"Done: {title} ({values})." if values else f"Done: {title}."
+    response.async_set_speech(said)
+    return response
 
 
 async def _execute_whole_house(

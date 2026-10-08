@@ -28,6 +28,7 @@ from .const import (
     ANSWER_TIMEOUT,
     BACKEND_OLLAMA,
     BACKEND_OPENAI_COMPAT,
+    FILL_MAX_TOKENS,
     LLM_KEEP_ALIVE,
     LOGGER,
     MAX_SUB_COMMANDS,
@@ -84,8 +85,28 @@ Current time: {local_time} on {weekday}. The speaker is in {speaker_area}.
 Home state:
 {home_state}"""
 
+FILL_SYSTEM_PROMPT = """\
+You fill in the details of a Home Assistant script the user asked to run.
+
+Script: {title}
+What it does: {description}
+
+Reply with one JSON object matching this JSON schema, nothing else:
+{schema}
+
+- Give a field only when the request says it, or when the field's description \
+tells you how to work it out (for example from the room the user is in).
+- Leave a field out rather than guess. Never invent a time, number or name.
+- Times are 24-hour HH:MM:SS. "5.15 a.m." is 05:15:00, "quarter to seven in the \
+evening" is 18:45:00.
+
+The user is in: {speaker_area}
+It is now {local_time}, {weekday}.
+"""
+
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 _ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
+_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 class LLMBackendError(Exception):
@@ -122,6 +143,7 @@ class LLMBackend(ABC):
         max_tokens: int,
         temperature: float,
         timeout: float,
+        schema: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Send a chat completion.
 
@@ -206,6 +228,46 @@ class LLMBackend(ABC):
         _log_exchange("answer", self.name, self._model, messages, text, metrics)
         return text.strip()
 
+    async def fill_fields(
+        self,
+        utterance: str,
+        *,
+        title: str,
+        description: str,
+        schema: dict[str, Any],
+        speaker_area: str | None,
+        local_time: str,
+        weekday: str,
+        earlier: str | None = None,
+    ) -> dict[str, Any]:
+        """Fill in the fields of a script Jev already chose, as one JSON object.
+
+        Raises LLMBackendError when the model cannot be reached. A reply that is
+        not an object comes back empty, which the caller treats as nothing said.
+        """
+        system = FILL_SYSTEM_PROMPT.format(
+            title=title,
+            description=description or "No description.",
+            schema=json.dumps(schema, separators=(",", ":")),
+            speaker_area=speaker_area or "an unknown room",
+            local_time=local_time,
+            weekday=weekday,
+        )
+        request = f"Earlier: {earlier}\nNow: {utterance}" if earlier else utterance
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": request},
+        ]
+        raw, metrics = await self._chat(
+            messages,
+            max_tokens=FILL_MAX_TOKENS,
+            temperature=0.0,
+            timeout=self._answer_timeout,
+            schema=schema,
+        )
+        _log_exchange("fill", self.name, self._model, messages, raw, metrics)
+        return _parse_object(raw)
+
 
 class OllamaBackend(LLMBackend):
     """Ollama's native chat endpoint."""
@@ -224,6 +286,7 @@ class OllamaBackend(LLMBackend):
         max_tokens: int,
         temperature: float,
         timeout: float,
+        schema: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         payload: dict[str, Any] = {
             "model": self._model,
@@ -234,6 +297,9 @@ class OllamaBackend(LLMBackend):
         if self.keep_loaded:
             # Only on request. Otherwise the server's own idle setting decides.
             payload["keep_alive"] = LLM_KEEP_ALIVE
+        if schema is not None:
+            # Ollama constrains the reply to this JSON schema.
+            payload["format"] = schema
         headers = {}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -298,14 +364,20 @@ class OpenAICompatBackend(LLMBackend):
         max_tokens: int,
         temperature: float,
         timeout: float,
+        schema: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        payload = {
+        payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "stream": False,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if schema is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "fields", "schema": schema, "strict": False},
+            }
         headers = {}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -315,13 +387,16 @@ class OpenAICompatBackend(LLMBackend):
         if self._title:
             headers["X-Title"] = self._title
         started = time.monotonic()
-        data = await _post_json(
-            self._session,
-            f"{self._base_url}/v1/chat/completions",
-            payload,
-            headers,
-            timeout,
-        )
+        url = f"{self._base_url}/v1/chat/completions"
+        try:
+            data = await _post_json(self._session, url, payload, headers, timeout)
+        except LLMBackendError as err:
+            if "response_format" not in payload or str(err) != "HTTP 400":
+                raise
+            # Not every server or model takes a schema. The prompt carries it
+            # too, so ask once more for plain JSON.
+            del payload["response_format"]
+            data = await _post_json(self._session, url, payload, headers, timeout)
         elapsed = time.monotonic() - started
         try:
             text = data["choices"][0]["message"]["content"] or ""
@@ -477,6 +552,19 @@ async def _post_json(
         ) from err
     except json.JSONDecodeError as err:
         raise LLMBackendError(f"Response was not JSON: {err}") from err
+
+
+def _parse_object(raw: str) -> dict[str, Any]:
+    """The JSON object in a reply, or an empty one."""
+    found = _OBJECT_RE.search(raw)
+    for candidate in (*_candidates(raw), found.group(0) if found else ""):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError, TypeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
 
 
 def _parse_string_array(raw: str) -> list[str]:

@@ -130,6 +130,12 @@ class Plan:
     command - see _resolve_area."""
 
     # presentation
+    script_service: str | None = None
+    script_data: dict[str, Any] | None = None
+    """A script's field values, filled by the language model and checked against
+    its selectors. Set, the script is called directly with them instead of
+    through the generic turn-on intent, which carries no data."""
+
     name_target_in_speech: bool = False
     """True in the middle confidence band: act, but say what we acted on."""
 
