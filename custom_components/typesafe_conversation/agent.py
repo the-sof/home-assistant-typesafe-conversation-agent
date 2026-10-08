@@ -792,15 +792,20 @@ class TypeSafeAgent:
         filled: _Filled,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
+        original: str | None = None,
     ) -> intent.IntentResponse:
         """Ask for the first missing required value, and wait for the answer."""
+        now = time.monotonic()
+        # A question nobody answered would otherwise be kept until a restart.
+        for stale in [k for k, p in self._pending.items() if p.expires < now]:
+            del self._pending[stale]
         # The chat log's id, not the input's: a first turn arrives without one.
         if key := chat_log.conversation_id:
             self._pending[key] = _PendingFill(
                 plan=plan,
                 fields=filled.fields,
-                original=user_input.text,
-                expires=time.monotonic() + PENDING_FILL_SECONDS,
+                original=original or user_input.text,
+                expires=now + PENDING_FILL_SECONDS,
             )
         field_name = filled.missing[0].name.lower()
         return self._speech(
@@ -831,9 +836,22 @@ class TypeSafeAgent:
         if filled is None:
             return None
         merged = {**earlier_values, **(pending.plan.script_data or {})}
-        if any(f.required and f.key not in merged for f in pending.fields.fields):
-            return None
         pending.plan.script_data = merged
+        missing = [
+            f for f in pending.fields.fields if f.required and f.key not in merged
+        ]
+        if missing:
+            if merged.keys() <= earlier_values.keys():
+                # Nothing new and usable: not an answer, so a new request.
+                return None
+            # An answer, but more is needed: keep it and ask for the next one.
+            return self._ask_for_field(
+                pending.plan,
+                _Filled(pending.fields, missing),
+                user_input,
+                chat_log,
+                original=pending.original,
+            )
         if self._traces is not None:
             self._traces.append(
                 {

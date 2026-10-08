@@ -1098,3 +1098,47 @@ async def test_choosing_no_language_model_clears_it(
     await hass.async_block_till_done()
     assert result["reason"] == "reconfigure_successful"
     assert "llm_model" not in entry.data
+
+
+async def test_a_server_with_no_models_rejects_any_model(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """An empty list is an answer: the server has nothing to run."""
+    _entry, result = await _to_llm_step(hass, aioclient_mock)
+    aioclient_mock.get("http://ollama.box:11434/api/tags", json={"models": []})
+    aioclient_mock.get("http://localhost:11434/api/tags", json={"models": []})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "ollama"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"llm_base_url": "http://ollama.box:11434", "llm_model": "qwen3"},
+    )
+    assert result["errors"] == {"llm_model": "llm_model_not_found"}
+
+
+async def test_a_malformed_language_model_address_is_a_form_error(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    _entry, result = await _to_llm_step(hass, aioclient_mock)
+    aioclient_mock.get("http://localhost:11434/api/tags", json={"models": []})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "ollama"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"llm_base_url": "http://[::1:11434", "llm_model": "qwen3", "llm_api_key": "k"},
+    )
+    assert result["errors"] == {"base": "invalid_url"}
+
+
+async def test_a_malformed_server_address_is_a_form_error(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_BASE_URL: "http://[::1:11434", CONF_API_KEY: "k"}
+    )
+    assert result["errors"] == {"base": "invalid_url"}

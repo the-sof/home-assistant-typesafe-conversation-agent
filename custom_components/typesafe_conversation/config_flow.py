@@ -77,6 +77,7 @@ from .system_one import (
     key_would_leak,
     normalise_base_url,
     normalise_model,
+    valid_url,
 )
 
 _PASSWORD = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
@@ -226,6 +227,8 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
         self._data[CONF_BASE_URL] = normalise_base_url(user_input.get(CONF_BASE_URL))
         if not user_input.get(CONF_API_KEY):
             self._data.pop(CONF_API_KEY, None)
+        if not valid_url(self._data[CONF_BASE_URL]):
+            return "invalid_url"
         if key_would_leak(self._data[CONF_BASE_URL], self._data.get(CONF_API_KEY)):
             return "insecure_key"
         client = self._client()
@@ -421,7 +424,9 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             url = normalise_llm_url(backend, user_input[CONF_LLM_BASE_URL])
             key = user_input.get(CONF_LLM_API_KEY) or None
-            if key_would_leak(url, key):
+            if not valid_url(url):
+                errors["base"] = "invalid_url"
+            elif key_would_leak(url, key):
                 errors["base"] = "insecure_key"
             else:
                 try:
@@ -437,7 +442,12 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
                         else "llm_cannot_connect"
                     )
             model = user_input[CONF_LLM_MODEL]
-            if not errors and models and not any(same_model(model, m) for m in models):
+            # An empty list is an answer too: a server with no models installed.
+            if (
+                not errors
+                and models is not None
+                and not any(same_model(model, m) for m in models)
+            ):
                 errors[CONF_LLM_MODEL] = "llm_model_not_found"
             if not errors:
                 # Replace rather than merge, so clearing a field (or switching

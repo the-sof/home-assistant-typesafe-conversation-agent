@@ -77,7 +77,8 @@
       "llm_cannot_connect": "Could not reach the language model at that address.",
       "llm_cannot_connect_localhost": "Could not reach the language model at localhost. If Home Assistant runs in a container, localhost is the container itself: use the address of the machine running the model.",
       "llm_invalid_auth": "The language model server rejected that API key.",
-      "llm_model_not_found": "The server doesn't offer that model. Pick one from the list."
+      "llm_model_not_found": "The server doesn't offer that model. Pick one from the list.",
+      "invalid_url": "That isn't a valid address. Start it with http:// or https://, then the host and port."
     },
     "abort": {
       "reauth_successful": "Re-authentication was successful.",

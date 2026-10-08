@@ -191,6 +191,19 @@ def normalise_base_url(url: str | None) -> str:
     return (url or DEFAULT_BASE_URL).strip().rstrip("/")
 
 
+def valid_url(url: str | None) -> bool:
+    """An http(s) address with a host, that urllib can parse.
+
+    A malformed one - a missing scheme, an unclosed IPv6 bracket - is caught
+    here so the form can say so, instead of raising further in.
+    """
+    try:
+        parts = urlsplit((url or "").strip())
+        return parts.scheme in ("http", "https") and bool(parts.hostname)
+    except ValueError:
+        return False
+
+
 def key_would_leak(base_url: str | None, api_key: str | None) -> bool:
     """True when a key would cross a network that is not ours in cleartext.
 

@@ -319,3 +319,41 @@ async def test_a_compound_part_missing_a_value_runs_nothing(hass, values):
 
     execute.assert_not_called()
     assert response.response_type is intent.IntentResponseType.ERROR
+
+
+async def test_answers_are_kept_while_another_value_is_still_needed(
+    hass: HomeAssistant,
+):
+    """Two values missing: the first answer is kept, and the second is asked for."""
+    await _scripts(hass)
+    llm = MagicMock()
+    llm.fill_fields = AsyncMock(
+        side_effect=[
+            {},
+            {"alarm_time": "05:15:00"},
+            {"location": "upstairs"},
+        ]
+    )
+    pending: dict = {}
+    agent = _agent(hass, llm, pending)
+
+    assert _speech(await _say(agent, "set an alarm")) == "What time should I use?"
+    assert _speech(await _say(agent, "5:15 am")) == "What location should I use?"
+    done = await _say(agent, "upstairs")
+
+    assert _speech(done) == "Alarm set for 05:15:00 upstairs."
+    assert llm.fill_fields.await_args.kwargs["earlier"] == "set an alarm"
+
+
+async def test_an_unanswered_question_is_forgotten_in_time(hass: HomeAssistant):
+    """Conversations that never answer must not pile up for the life of the entry."""
+    await _scripts(hass)
+    llm = MagicMock()
+    llm.fill_fields = AsyncMock(return_value={})
+    stale = MagicMock(expires=0.0)
+    pending: dict = {"long-gone": stale}
+
+    await _say(_agent(hass, llm, pending), "set an alarm")
+
+    assert "long-gone" not in pending
+    assert "c1" in pending
