@@ -491,3 +491,93 @@ async def test_a_choice_is_only_dropped_when_asked(hass: HomeAssistant, reply, u
         await _say(agent, reply)
 
     assert execute.await_args.args[1].script_data["speakers"] == used
+
+
+# --- questions answered by scripts, and what scripts reply ----------------------
+
+REPLIES = {
+    "list_alarms": {
+        "alias": "List alarms",
+        "sequence": [
+            {"variables": {"reply": {"result": "Two alarms are set."}}},
+            {"stop": "listed", "response_variable": "reply"},
+        ],
+    },
+    "full_alarm": {
+        "alias": "Full alarm",
+        "sequence": [
+            {"variables": {"reply": {"result": "All three alarm slots are in use."}}},
+            {"stop": "no slot", "response_variable": "reply"},
+        ],
+    },
+    "only_string": {
+        "alias": "Only string",
+        "sequence": [
+            {"variables": {"reply": {"anything": "Said in its own key.", "n": 2}}},
+            {"stop": "ok", "response_variable": "reply"},
+        ],
+    },
+    "silent": {"alias": "Silent", "sequence": [{"delay": 0}]},
+    "slow": {"alias": "Slow routine", "sequence": [{"delay": {"seconds": 1}}]},
+}
+
+
+async def _reply_scripts(hass: HomeAssistant) -> None:
+    assert await async_setup_component(hass, "script", {"script": REPLIES})
+    await hass.async_block_till_done()
+
+
+def _script_plan(object_id: str, title: str) -> Plan:
+    entity = CatalogEntity(
+        entity_id=f"script.{object_id}",
+        name=title,
+        aliases=(),
+        area_id=None,
+        area_name=None,
+        floor_name=None,
+        domain="script",
+        device_class=None,
+        supported_features=0,
+    )
+    return Plan(
+        Route.COMMAND,
+        domain="script",
+        action="run",
+        spec=spec_for("script", "run"),
+        target=Target(entity=entity, domain="script"),
+    )
+
+
+async def _run(hass, object_id, title):
+    agent = _agent(hass, None, {})
+    with patch(f"{AGENT}.route", return_value=_script_plan(object_id, title)):
+        return await agent.async_process(_input("go"), MagicMock(conversation_id="c1"))
+
+
+@pytest.mark.parametrize(
+    ("object_id", "title", "said"),
+    [
+        ("list_alarms", "List alarms", "Two alarms are set."),
+        ("full_alarm", "Full alarm", "All three alarm slots are in use."),
+        ("only_string", "Only string", "Said in its own key."),
+        ("silent", "Silent", "Done: Silent."),
+    ],
+)
+async def test_what_a_script_replies_is_what_is_said(
+    hass: HomeAssistant, object_id, title, said
+):
+    """Including a refusal: "slots in use" must never be announced as "Done"."""
+    await _reply_scripts(hass)
+    assert _speech(await _run(hass, object_id, title)) == said
+
+
+async def test_a_long_routine_is_left_running(hass: HomeAssistant):
+    """A delay in the script must not hold up the voice reply."""
+    await _reply_scripts(hass)
+    with patch(
+        "custom_components.typesafe_conversation.executor.SCRIPT_REPLY_SECONDS", 0.05
+    ):
+        response = await _run(hass, "slow", "Slow routine")
+    assert _speech(response) == "Started Slow routine."
+    assert hass.states.get("script.slow").state == "on"
+    await hass.async_block_till_done()

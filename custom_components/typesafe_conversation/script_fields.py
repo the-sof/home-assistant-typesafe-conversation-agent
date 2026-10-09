@@ -108,6 +108,15 @@ class ScriptFields:
         return filled, missing
 
 
+def script_service(hass: HomeAssistant, entity_id: str) -> str | None:
+    """A script's service name: its registry unique id, else its object id."""
+    if not entity_id.startswith(f"{SCRIPT_DOMAIN}."):
+        return None
+    if (entry := er.async_get(hass).async_get(entity_id)) and entry.unique_id:
+        return entry.unique_id
+    return entity_id.split(".", 1)[1]
+
+
 def async_script_fields(hass: HomeAssistant, entity_id: str) -> ScriptFields | None:
     """A script's fields, or None when it has none.
 
@@ -115,11 +124,8 @@ def async_script_fields(hass: HomeAssistant, entity_id: str) -> ScriptFields | N
     service name - the registry unique id - which is what Home Assistant's own
     LLM tools read. Nothing here is fetched; it is already in memory.
     """
-    if not entity_id.startswith(f"{SCRIPT_DOMAIN}."):
+    if (name := script_service(hass, entity_id)) is None:
         return None
-    name = entity_id.split(".", 1)[1]
-    if (entry := er.async_get(hass).async_get(entity_id)) and entry.unique_id:
-        name = entry.unique_id
     description = service.async_get_cached_service_description(
         hass, SCRIPT_DOMAIN, name
     )

@@ -42,7 +42,12 @@ from .executor import (
 from .extraction import extract
 from .llm_backend import LLMBackend, LLMBackendError
 from .router import Plan, Route, route, should_try_llm_answer
-from .script_fields import ScriptField, ScriptFields, async_script_fields
+from .script_fields import (
+    ScriptField,
+    ScriptFields,
+    async_script_fields,
+    script_service,
+)
 from .system_one import (
     SystemOneClient,
     SystemOneError,
@@ -753,6 +758,13 @@ class TypeSafeAgent:
             return None
         fields = async_script_fields(self.hass, entity.entity_id)
         if fields is None:
+            # Nothing to fill, but still call it directly: the turn-on intent
+            # drops whatever the script replies.
+            if (
+                service_name := script_service(self.hass, entity.entity_id)
+            ) is not None:
+                plan.script_service = service_name
+                plan.script_data = {}
             return None
         if self.llm is None:
             raise _FillFailed(

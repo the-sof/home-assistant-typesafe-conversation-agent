@@ -9,6 +9,7 @@ still getting Home Assistant's own exposure check and response speech.
 
 from __future__ import annotations
 
+import asyncio
 import math
 from dataclasses import replace
 from typing import Any
@@ -33,7 +34,7 @@ from .actions import (
     INTENT_TURN_OFF,
     INTENT_TURN_ON,
 )
-from .const import CONVERSATION_DOMAIN, DOMAIN, LOGGER
+from .const import CONVERSATION_DOMAIN, DOMAIN, LOGGER, SCRIPT_REPLY_SECONDS
 from .entities import CONTROLLABLE_DOMAINS, CatalogEntity, EntityCatalog
 from .router import Plan, Target
 from .script_fields import describe_values
@@ -318,11 +319,16 @@ def _finite(value: Any) -> bool:
 async def _run_script(
     hass: HomeAssistant, plan: Plan, user_input: conversation.ConversationInput
 ) -> intent.IntentResponse:
-    """Call a script with its field values; the turn-on intent cannot pass them."""
+    """Call a script directly, and say what it replied.
+
+    The turn-on intent carries no field values and returns nothing the script
+    said, so a script's "Alarm set for 6:22 PM in the kitchen" - or "All three
+    alarm slots are in use" - would be lost behind a generic "Done".
+    """
     entity = plan.target.entity
     title = entity.name if entity is not None else plan.script_service
-    try:
-        result = await hass.services.async_call(
+    call = hass.async_create_task(
+        hass.services.async_call(
             "script",
             plan.script_service,
             plan.script_data,
@@ -330,28 +336,47 @@ async def _run_script(
             return_response=True,
             context=user_input.context,
         )
+    )
+    done, _ = await asyncio.wait({call}, timeout=SCRIPT_REPLY_SECONDS)
+    response = intent.IntentResponse(language=user_input.language)
+    if entity is not None:
+        response.async_set_results(success_results=[_entity_target(entity)])
+    if not done:
+        # A routine with delays: let it run on, rather than hold the voice reply.
+        call.add_done_callback(_log_late_failure)
+        response.async_set_speech(f"Started {title}.")
+        return response
+    try:
+        result = call.result()
     except HomeAssistantError as err:
         # ServiceValidationError included: the script refused these values.
         raise ExecutionError(f"{title} didn't run: {err}") from err
 
-    response = intent.IntentResponse(language=user_input.language)
-    if entity is not None:
-        response.async_set_results(success_results=[_entity_target(entity)])
-    said = None
-    if isinstance(result, dict):
-        said = next(
-            (
-                result[k]
-                for k in ("speech", "message")
-                if isinstance(result.get(k), str)
-            ),
-            None,
-        )
+    said = _reply_text(result)
     if said is None:
         values = describe_values(plan.script_data or {})
         said = f"Done: {title} ({values})." if values else f"Done: {title}."
     response.async_set_speech(said)
     return response
+
+
+_REPLY_KEYS = ("speech", "message", "result", "response", "text")
+
+
+def _reply_text(result: Any) -> str | None:
+    """What a script said, from the common shapes its response takes."""
+    if not isinstance(result, dict):
+        return None
+    for key in _REPLY_KEYS:
+        if isinstance(value := result.get(key), str) and value.strip():
+            return value.strip()
+    strings = [v.strip() for v in result.values() if isinstance(v, str) and v.strip()]
+    return strings[0] if len(strings) == 1 else None
+
+
+def _log_late_failure(task: asyncio.Task[Any]) -> None:
+    if not task.cancelled() and (err := task.exception()) is not None:
+        LOGGER.debug("A script that ran on in the background failed: %s", err)
 
 
 async def _execute_whole_house(
