@@ -15,6 +15,7 @@ from dataclasses import replace
 from typing import Any
 
 from homeassistant.components import conversation
+from homeassistant.components.homeassistant import async_should_expose
 from homeassistant.const import (
     STATE_OFF,
     STATE_UNAVAILABLE,
@@ -327,6 +328,12 @@ async def _run_script(
     """
     entity = plan.target.entity
     title = entity.name if entity is not None else plan.script_service
+    # The turn-on intent checked exposure as it ran; calling the script
+    # directly does not. Exposure may have changed while the model was asked.
+    if entity is None or not async_should_expose(
+        hass, CONVERSATION_DOMAIN, entity.entity_id
+    ):
+        raise ExecutionError(f"{title} isn't available to Assist.")
     call = hass.async_create_task(
         hass.services.async_call(
             "script",

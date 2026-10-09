@@ -74,6 +74,17 @@ ALARM = {
 }
 
 
+async def _expose_scripts(hass: HomeAssistant) -> None:
+    """Scripts reach the agent only when exposed to Assist; the call rechecks."""
+    from homeassistant.components.homeassistant.exposed_entities import (
+        async_expose_entity,
+    )
+
+    assert await async_setup_component(hass, "homeassistant", {})
+    for entity_id in hass.states.async_entity_ids("script"):
+        async_expose_entity(hass, conversation.DOMAIN, entity_id, True)
+
+
 async def _scripts(hass: HomeAssistant) -> None:
     assert await async_setup_component(
         hass,
@@ -86,6 +97,7 @@ async def _scripts(hass: HomeAssistant) -> None:
         },
     )
     await hass.async_block_till_done()
+    await _expose_scripts(hass)
 
 
 # --- reading a script's fields -------------------------------------------------
@@ -525,6 +537,7 @@ REPLIES = {
 async def _reply_scripts(hass: HomeAssistant) -> None:
     assert await async_setup_component(hass, "script", {"script": REPLIES})
     await hass.async_block_till_done()
+    await _expose_scripts(hass)
 
 
 def _script_plan(object_id: str, title: str) -> Plan:
@@ -581,6 +594,21 @@ async def test_a_long_routine_is_left_running(hass: HomeAssistant):
     assert _speech(response) == "Started Slow routine."
     assert hass.states.get("script.slow").state == "on"
     await hass.async_block_till_done()
+
+
+async def test_a_script_hidden_from_assist_is_not_run(hass: HomeAssistant):
+    """Exposure is rechecked at the call: it may change while the model thinks."""
+    from homeassistant.components.homeassistant.exposed_entities import (
+        async_expose_entity,
+    )
+
+    await _reply_scripts(hass)
+    async_expose_entity(hass, conversation.DOMAIN, "script.list_alarms", False)
+
+    response = await _run(hass, "list_alarms", "List alarms")
+
+    assert response.response_type is intent.IntentResponseType.ERROR
+    assert "isn't available to Assist" in _speech(response)
 
 
 def _query_response(risky: float, kind: str = "needs_prose") -> SystemOneResponse:
