@@ -113,6 +113,10 @@ SPLIT_MAX_TOKENS: Final = 200
 ANSWER_MAX_TOKENS: Final = 180
 FILL_MAX_TOKENS: Final = 300
 """Room for a script's field values as JSON; they are short."""
+SCRIPT_REPLY_SECONDS: Final = 10.0
+"""How long to wait for a script's reply before saying it started.
+
+A routine with delays would otherwise hold up the voice reply until it ends."""
 PENDING_FILL_SECONDS: Final = 90
 """How long the agent waits for the answer to "What time should I set it for?"."""
 ANSWER_TEMPERATURE: Final = 0.3

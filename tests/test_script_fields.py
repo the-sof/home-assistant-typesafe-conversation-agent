@@ -74,6 +74,17 @@ ALARM = {
 }
 
 
+async def _expose_scripts(hass: HomeAssistant) -> None:
+    """Scripts reach the agent only when exposed to Assist; the call rechecks."""
+    from homeassistant.components.homeassistant.exposed_entities import (
+        async_expose_entity,
+    )
+
+    assert await async_setup_component(hass, "homeassistant", {})
+    for entity_id in hass.states.async_entity_ids("script"):
+        async_expose_entity(hass, conversation.DOMAIN, entity_id, True)
+
+
 async def _scripts(hass: HomeAssistant) -> None:
     assert await async_setup_component(
         hass,
@@ -86,6 +97,7 @@ async def _scripts(hass: HomeAssistant) -> None:
         },
     )
     await hass.async_block_till_done()
+    await _expose_scripts(hass)
 
 
 # --- reading a script's fields -------------------------------------------------
@@ -491,3 +503,165 @@ async def test_a_choice_is_only_dropped_when_asked(hass: HomeAssistant, reply, u
         await _say(agent, reply)
 
     assert execute.await_args.args[1].script_data["speakers"] == used
+
+
+# --- questions answered by scripts, and what scripts reply ----------------------
+
+REPLIES = {
+    "list_alarms": {
+        "alias": "List alarms",
+        "sequence": [
+            {"variables": {"reply": {"result": "Two alarms are set."}}},
+            {"stop": "listed", "response_variable": "reply"},
+        ],
+    },
+    "full_alarm": {
+        "alias": "Full alarm",
+        "sequence": [
+            {"variables": {"reply": {"result": "All three alarm slots are in use."}}},
+            {"stop": "no slot", "response_variable": "reply"},
+        ],
+    },
+    "only_string": {
+        "alias": "Only string",
+        "sequence": [
+            {"variables": {"reply": {"anything": "Said in its own key.", "n": 2}}},
+            {"stop": "ok", "response_variable": "reply"},
+        ],
+    },
+    "silent": {"alias": "Silent", "sequence": [{"delay": 0}]},
+    "slow": {"alias": "Slow routine", "sequence": [{"delay": {"seconds": 1}}]},
+}
+
+
+async def _reply_scripts(hass: HomeAssistant) -> None:
+    assert await async_setup_component(hass, "script", {"script": REPLIES})
+    await hass.async_block_till_done()
+    await _expose_scripts(hass)
+
+
+def _script_plan(object_id: str, title: str) -> Plan:
+    entity = CatalogEntity(
+        entity_id=f"script.{object_id}",
+        name=title,
+        aliases=(),
+        area_id=None,
+        area_name=None,
+        floor_name=None,
+        domain="script",
+        device_class=None,
+        supported_features=0,
+    )
+    return Plan(
+        Route.COMMAND,
+        domain="script",
+        action="run",
+        spec=spec_for("script", "run"),
+        target=Target(entity=entity, domain="script"),
+    )
+
+
+async def _run(hass, object_id, title):
+    agent = _agent(hass, None, {})
+    with patch(f"{AGENT}.route", return_value=_script_plan(object_id, title)):
+        return await agent.async_process(_input("go"), MagicMock(conversation_id="c1"))
+
+
+@pytest.mark.parametrize(
+    ("object_id", "title", "said"),
+    [
+        ("list_alarms", "List alarms", "Two alarms are set."),
+        ("full_alarm", "Full alarm", "All three alarm slots are in use."),
+        ("only_string", "Only string", "Said in its own key."),
+        ("silent", "Silent", "Done: Silent."),
+    ],
+)
+async def test_what_a_script_replies_is_what_is_said(
+    hass: HomeAssistant, object_id, title, said
+):
+    """Including a refusal: "slots in use" must never be announced as "Done"."""
+    await _reply_scripts(hass)
+    assert _speech(await _run(hass, object_id, title)) == said
+
+
+async def test_a_long_routine_is_left_running(hass: HomeAssistant):
+    """A delay in the script must not hold up the voice reply."""
+    await _reply_scripts(hass)
+    with patch(
+        "custom_components.typesafe_conversation.executor.SCRIPT_REPLY_SECONDS", 0.05
+    ):
+        response = await _run(hass, "slow", "Slow routine")
+    assert _speech(response) == "Started Slow routine."
+    assert hass.states.get("script.slow").state == "on"
+    await hass.async_block_till_done()
+
+
+async def test_a_script_hidden_from_assist_is_not_run(hass: HomeAssistant):
+    """Exposure is rechecked at the call: it may change while the model thinks."""
+    from homeassistant.components.homeassistant.exposed_entities import (
+        async_expose_entity,
+    )
+
+    await _reply_scripts(hass)
+    async_expose_entity(hass, conversation.DOMAIN, "script.list_alarms", False)
+
+    response = await _run(hass, "list_alarms", "List alarms")
+
+    assert response.response_type is intent.IntentResponseType.ERROR
+    assert "isn't available to Assist" in _speech(response)
+
+
+def _query_response(risky: float, kind: str = "needs_prose") -> SystemOneResponse:
+    return SystemOneResponse(
+        model="jev",
+        answers={
+            Q.Q_CATEGORY: _choice("query", 0.9),
+            Q.Q_COMPOUND: NoulAnswer(0.02),
+            Q.Q_QUERY_KIND: _choice(kind, 0.68, "count"),
+            Q.Q_TARGET_ENTITY: _choice("script.list_alarms", 0.9, Q.NO_SINGLE_ENTITY),
+            Q.Q_TARGET_DOMAIN: _choice("script", 0.8, Q.NO_DOMAIN),
+            Q.Q_TARGET_AREA: _choice(Q.NO_AREA, 0.9),
+            Q.Q_RISKY: NoulAnswer(risky),
+            Q.Q_HERE_RELATIVE: NoulAnswer(0.1),
+        },
+        input_tokens=0,
+        output_tokens=0,
+        latency_ms=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("risky", "kind", "route_to"),
+    [
+        (0.02, "needs_prose", Route.COMMAND),
+        (0.9, "needs_prose", Route.QUERY),
+        # "Is the bedtime routine running?" reads the script, never starts it.
+        (0.02, "device_state", Route.QUERY),
+    ],
+)
+def test_a_question_answered_by_a_script_runs_it(risky, kind, route_to):
+    """ "List all the alarms" runs list_alarms, unless risky or about its state."""
+    from custom_components.typesafe_conversation.extraction import extract
+
+    alarms = CatalogEntity(
+        entity_id="script.list_alarms",
+        name="List alarms",
+        aliases=(),
+        area_id=None,
+        area_name=None,
+        floor_name=None,
+        domain="script",
+        device_class=None,
+        supported_features=0,
+    )
+    plan = route(
+        _query_response(risky, kind),
+        entities_by_id={alarms.entity_id: alarms},
+        extraction=extract("list all the alarms", want_media=False, want_color=False),
+        speaker_area_id=None,
+        available_domains=frozenset({"script"}),
+    )
+    assert plan.route is route_to
+    if route_to is Route.COMMAND:
+        assert plan.action == "run"
+        assert plan.target.entity.entity_id == "script.list_alarms"
