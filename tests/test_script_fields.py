@@ -583,13 +583,13 @@ async def test_a_long_routine_is_left_running(hass: HomeAssistant):
     await hass.async_block_till_done()
 
 
-def _query_response(risky: float) -> SystemOneResponse:
+def _query_response(risky: float, kind: str = "needs_prose") -> SystemOneResponse:
     return SystemOneResponse(
         model="jev",
         answers={
             Q.Q_CATEGORY: _choice("query", 0.9),
             Q.Q_COMPOUND: NoulAnswer(0.02),
-            Q.Q_QUERY_KIND: _choice("needs_prose", 0.68, "count"),
+            Q.Q_QUERY_KIND: _choice(kind, 0.68, "count"),
             Q.Q_TARGET_ENTITY: _choice("script.list_alarms", 0.9, Q.NO_SINGLE_ENTITY),
             Q.Q_TARGET_DOMAIN: _choice("script", 0.8, Q.NO_DOMAIN),
             Q.Q_TARGET_AREA: _choice(Q.NO_AREA, 0.9),
@@ -603,10 +603,16 @@ def _query_response(risky: float) -> SystemOneResponse:
 
 
 @pytest.mark.parametrize(
-    ("risky", "route_to"), [(0.02, Route.COMMAND), (0.9, Route.QUERY)]
+    ("risky", "kind", "route_to"),
+    [
+        (0.02, "needs_prose", Route.COMMAND),
+        (0.9, "needs_prose", Route.QUERY),
+        # "Is the bedtime routine running?" reads the script, never starts it.
+        (0.02, "device_state", Route.QUERY),
+    ],
 )
-def test_a_question_answered_by_a_script_runs_it(risky, route_to):
-    """ "List all the alarms" runs list_alarms, unless it looks risky."""
+def test_a_question_answered_by_a_script_runs_it(risky, kind, route_to):
+    """ "List all the alarms" runs list_alarms, unless risky or about its state."""
     from custom_components.typesafe_conversation.extraction import extract
 
     alarms = CatalogEntity(
@@ -621,7 +627,7 @@ def test_a_question_answered_by_a_script_runs_it(risky, route_to):
         supported_features=0,
     )
     plan = route(
-        _query_response(risky),
+        _query_response(risky, kind),
         entities_by_id={alarms.entity_id: alarms},
         extraction=extract("list all the alarms", want_media=False, want_color=False),
         speaker_area_id=None,

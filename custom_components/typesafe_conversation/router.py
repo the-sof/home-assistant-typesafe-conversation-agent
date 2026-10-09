@@ -285,14 +285,17 @@ def _plan_query(
 
     risky = response.noul(Q.Q_RISKY) or 0.0
     if (
-        target.entity is not None
+        kind == "needs_prose"
+        and target.entity is not None
         and target.entity.domain == "script"
         and risky < NOUL_RISKY
     ):
         # A script that answers a question - "list my alarms" - is run, and its
         # reply is the answer. The language model has no idea what it knows.
-        # Anything that looks risky stays a question: asking must never quietly
-        # trigger it.
+        # Only for questions whose answer has to come from somewhere else: "is
+        # the bedtime routine running?" asks about the script's own state and
+        # must read it, not start it. Anything that looks risky stays a
+        # question too: asking must never quietly trigger it.
         trace["action"] = "implied"
         return Plan(
             Route.COMMAND,
