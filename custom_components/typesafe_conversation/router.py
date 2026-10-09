@@ -283,6 +283,26 @@ def _plan_query(
     ):
         target.domain = target_domain.choice
 
+    risky = response.noul(Q.Q_RISKY) or 0.0
+    if (
+        target.entity is not None
+        and target.entity.domain == "script"
+        and risky < NOUL_RISKY
+    ):
+        # A script that answers a question - "list my alarms" - is run, and its
+        # reply is the answer. The language model has no idea what it knows.
+        # Anything that looks risky stays a question: asking must never quietly
+        # trigger it.
+        trace["action"] = "implied"
+        return Plan(
+            Route.COMMAND,
+            reason="query answered by script",
+            domain="script",
+            action="run",
+            spec=spec_for("script", "run"),
+            target=Target(entity=target.entity, domain="script"),
+            trace=trace,
+        )
     return Plan(
         Route.QUERY,
         reason=f"query/{kind}",

@@ -581,3 +581,53 @@ async def test_a_long_routine_is_left_running(hass: HomeAssistant):
     assert _speech(response) == "Started Slow routine."
     assert hass.states.get("script.slow").state == "on"
     await hass.async_block_till_done()
+
+
+def _query_response(risky: float) -> SystemOneResponse:
+    return SystemOneResponse(
+        model="jev",
+        answers={
+            Q.Q_CATEGORY: _choice("query", 0.9),
+            Q.Q_COMPOUND: NoulAnswer(0.02),
+            Q.Q_QUERY_KIND: _choice("needs_prose", 0.68, "count"),
+            Q.Q_TARGET_ENTITY: _choice("script.list_alarms", 0.9, Q.NO_SINGLE_ENTITY),
+            Q.Q_TARGET_DOMAIN: _choice("script", 0.8, Q.NO_DOMAIN),
+            Q.Q_TARGET_AREA: _choice(Q.NO_AREA, 0.9),
+            Q.Q_RISKY: NoulAnswer(risky),
+            Q.Q_HERE_RELATIVE: NoulAnswer(0.1),
+        },
+        input_tokens=0,
+        output_tokens=0,
+        latency_ms=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("risky", "route_to"), [(0.02, Route.COMMAND), (0.9, Route.QUERY)]
+)
+def test_a_question_answered_by_a_script_runs_it(risky, route_to):
+    """ "List all the alarms" runs list_alarms, unless it looks risky."""
+    from custom_components.typesafe_conversation.extraction import extract
+
+    alarms = CatalogEntity(
+        entity_id="script.list_alarms",
+        name="List alarms",
+        aliases=(),
+        area_id=None,
+        area_name=None,
+        floor_name=None,
+        domain="script",
+        device_class=None,
+        supported_features=0,
+    )
+    plan = route(
+        _query_response(risky),
+        entities_by_id={alarms.entity_id: alarms},
+        extraction=extract("list all the alarms", want_media=False, want_color=False),
+        speaker_area_id=None,
+        available_domains=frozenset({"script"}),
+    )
+    assert plan.route is route_to
+    if route_to is Route.COMMAND:
+        assert plan.action == "run"
+        assert plan.target.entity.entity_id == "script.list_alarms"
