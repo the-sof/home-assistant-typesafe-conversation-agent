@@ -145,11 +145,15 @@ def _register(hass: HomeAssistant) -> None:
 async def test_assist_is_never_offered(hass: HomeAssistant):
     """Assist controls devices; the answer path must not."""
     _register(hass)
+    # Core registers Assist itself before 2026.9, and the llm component after.
+    if llm.LLM_API_ASSIST not in {api.id for api in llm.async_get_apis(hass)}:
+        llm.async_register_api(
+            hass, _LookupAPI(hass=hass, id=llm.LLM_API_ASSIST, name="Assist")
+        )
 
     apis = lookup_apis(hass)
 
     assert apis == {"lookup": "Lookup"}
-    assert llm.LLM_API_ASSIST in {api.id for api in llm.async_get_apis(hass)}
     settings = {"web_search": "llm_api", "web_search_api": llm.LLM_API_ASSIST}
     assert await async_answer_tools(hass, settings, _user_input()) == []
 
