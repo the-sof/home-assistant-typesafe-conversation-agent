@@ -17,7 +17,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers import intent
+from homeassistant.helpers import intent, llm
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -951,6 +951,10 @@ async def test_keeping_the_model_loaded_can_be_switched_off_again(
             "llm_keep_loaded": False,
         },
     )
+    assert result["step_id"] == "web_search"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"web_search": "off"}
+    )
     await hass.async_block_till_done()
 
     assert result["reason"] == "reconfigure_successful"
@@ -1020,6 +1024,9 @@ async def test_a_pasted_v1_address_is_accepted_and_trimmed(
             "llm_api_key": "sk-or",
         },
     )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"web_search": "off"}
+    )
     await hass.async_block_till_done()
     assert result["reason"] == "reconfigure_successful"
     assert entry.data["llm_base_url"] == "https://openrouter.ai/api"
@@ -1085,6 +1092,8 @@ async def test_choosing_no_language_model_clears_it(
         llm_backend="ollama",
         llm_base_url="http://llm.invalid:11434",
         llm_model="a-model",
+        web_search="searxng",
+        web_search_url="http://searx.invalid:8888",
     )
     result = await entry.start_reconfigure_flow(hass)
     result = await hass.config_entries.flow.async_configure(
@@ -1099,6 +1108,8 @@ async def test_choosing_no_language_model_clears_it(
     await hass.async_block_till_done()
     assert result["reason"] == "reconfigure_successful"
     assert "llm_model" not in entry.data
+    assert "web_search" not in entry.data, "web search goes with the model"
+    assert "web_search_url" not in entry.data
 
 
 async def test_a_server_with_no_models_rejects_any_model(
@@ -1144,3 +1155,107 @@ async def test_a_malformed_server_address_is_a_form_error(
         result["flow_id"], {CONF_BASE_URL: "http://[::1:11434", CONF_API_KEY: "k"}
     )
     assert result["errors"] == {"base": "invalid_url"}
+
+
+# --- the web search step ---------------------------------------------------------
+
+SEARX = "http://searx.invalid:8888"
+
+
+async def _to_web_search_step(hass, aioclient_mock):
+    """An existing entry, reconfigured as far as the web search screen."""
+    entry, result = await _to_llm_step(hass, aioclient_mock)
+    for host in ("llm.invalid", "localhost"):
+        aioclient_mock.get(
+            f"http://{host}:11434/api/tags", json={"models": [{"name": "a-model"}]}
+        )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "ollama"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"llm_base_url": "http://llm.invalid:11434", "llm_model": "a-model"},
+    )
+    assert result["step_id"] == "web_search"
+    return entry, result
+
+
+def _lookup_api(hass: HomeAssistant) -> None:
+    class _API(llm.API):
+        async def async_get_api_instance(self, llm_context):
+            return llm.APIInstance(
+                api=self, api_prompt="", llm_context=llm_context, tools=[]
+            )
+
+    llm.async_register_api(hass, _API(hass=hass, id="search", name="Search"))
+
+
+async def test_searxng_is_checked_with_a_real_search_and_saved(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    entry, result = await _to_web_search_step(hass, aioclient_mock)
+    aioclient_mock.get(f"{SEARX}/search", json={"results": []})
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"web_search": "searxng", "web_search_url": f"{SEARX}/search/"},
+    )
+    await hass.async_block_till_done()
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data["web_search"] == "searxng"
+    assert entry.data["web_search_url"] == SEARX
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [
+        ({"status": 403}, "search_json_disabled"),
+        ({"exc": aiohttp.ClientError()}, "search_cannot_connect"),
+    ],
+)
+async def test_a_searxng_that_cannot_search_is_not_saved(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, reply, error
+):
+    _entry, result = await _to_web_search_step(hass, aioclient_mock)
+    aioclient_mock.get(f"{SEARX}/search", **reply)
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"web_search": "searxng", "web_search_url": SEARX}
+    )
+
+    assert result["errors"] == {"web_search_url": error}
+
+
+async def test_without_an_llm_api_there_is_none_to_pick(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    _entry, result = await _to_web_search_step(hass, aioclient_mock)
+    assert "web_search_api" not in result["data_schema"].schema
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"web_search": "llm_api"}
+    )
+
+    assert result["errors"] == {"base": "search_no_api"}
+
+
+async def test_an_llm_api_can_be_picked_but_never_assist(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    _lookup_api(hass)
+    entry, result = await _to_web_search_step(hass, aioclient_mock)
+    selector = next(
+        v for k, v in result["data_schema"].schema.items() if k == "web_search_api"
+    )
+    offered = [option["value"] for option in selector.config["options"]]
+    assert offered == ["search"]
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"web_search": "llm_api", "web_search_api": "search"}
+    )
+    await hass.async_block_till_done()
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data["web_search_api"] == "search"
+    assert "web_search_url" not in entry.data

@@ -1,13 +1,16 @@
-"""The two things we still need a text-generating model for.
+"""The things we still need a text-generating model for.
 
 Everything about controlling the home is decided by Jev and executed by code.
 The LLM is used only where a string genuinely has to be produced:
 
-1. splitting a compound request into atomic commands, and
-2. answering a general-knowledge or prose question.
+1. splitting a compound request into atomic commands,
+2. answering a general-knowledge or prose question, and
+3. filling in the fields of a script Jev already chose.
 
-It is never given tools and never told it can control anything, so a slow or
-failing LLM can delay an answer but can never block or corrupt a device action.
+It is never given a tool that acts on the home and never told it can control
+anything, so a slow or failing LLM can delay an answer but can never block or
+corrupt a device action. When web search is turned on, the answer path may be
+given read-only lookup tools (see tools.py) - nothing else.
 """
 
 from __future__ import annotations
@@ -18,7 +21,8 @@ import logging
 import re
 import time
 from abc import ABC, abstractmethod
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
@@ -32,10 +36,15 @@ from .const import (
     LLM_KEEP_ALIVE,
     LOGGER,
     MAX_SUB_COMMANDS,
+    MAX_TOOL_ROUNDS,
     PROMPT_LOG_CHARS,
     SPLIT_MAX_TOKENS,
     SPLIT_TIMEOUT,
+    TOOL_TIMEOUT,
 )
+
+if TYPE_CHECKING:
+    from .tools import AnswerTool
 
 SPLIT_SYSTEM_PROMPT = """\
 You split a smart-home voice command into atomic commands.
@@ -78,7 +87,7 @@ anything on or off, and never promise to do something.
 is not in it, or you are not confident, say you do not know rather than \
 guessing.
 - Answer general-knowledge questions truthfully and briefly from your own \
-knowledge.
+knowledge.{lookup}
 
 Current time: {local_time} on {weekday}. The speaker is in {speaker_area}.
 
@@ -115,6 +124,12 @@ The user is in: {speaker_area}
 It is now {local_time}, {weekday}.
 """
 
+ANSWER_LOOKUP_RULE = """
+- You have tools that look up current information. Use them for anything \
+current, live or that you are unsure of, such as news, schedules, scores, prices \
+or opening hours; answer stable general knowledge directly. If a lookup fails, \
+say you could not check. Never read out web addresses or list your sources."""
+
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 _ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 _OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -124,8 +139,28 @@ class LLMBackendError(Exception):
     """Any failure talking to the configured LLM."""
 
 
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """One call the model asked for, in the same shape whichever server."""
+
+    id: str
+    name: str
+    args: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _Turn:
+    """One reply that may ask for tools."""
+
+    text: str
+    calls: list[ToolCall]
+    assistant: dict[str, Any]
+    """The reply as a message, to send back alongside the tools' results."""
+    metrics: dict[str, Any]
+
+
 class LLMBackend(ABC):
-    """Two operations. Nothing else is ever asked of the LLM."""
+    """Splitting, answering and filling. Nothing else is ever asked of the LLM."""
 
     name: str
 
@@ -142,6 +177,9 @@ class LLMBackend(ABC):
         self._model = model
         self._api_key = api_key
         self._answer_timeout = answer_timeout
+        self._tools_supported = True
+        """Cleared when the model refuses a request with tools, so later answers
+        skip the failing round trip until the entry reloads."""
 
     async def async_warm_up(self) -> None:  # noqa: B027 - optional hook
         """Load the model ahead of need. Only Ollama does anything with this."""
@@ -149,7 +187,7 @@ class LLMBackend(ABC):
     @abstractmethod
     async def _chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         max_tokens: int,
         temperature: float,
@@ -167,6 +205,28 @@ class LLMBackend(ABC):
         waits, and it is the only figure that also covers connection setup
         and a slow link.
         """
+
+    @abstractmethod
+    async def _chat_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int,
+        temperature: float,
+        timeout: float,
+        final: bool = False,
+    ) -> _Turn:
+        """Send a chat completion that offers tools.
+
+        With ``final`` the model may not call any more of them and has to
+        answer with what it has.
+        """
+
+    @staticmethod
+    @abstractmethod
+    def _tool_result(call: ToolCall, content: str) -> dict[str, Any]:
+        """A tool's result, as the message this server expects."""
 
     async def split_compound(self, utterance: str) -> list[str]:
         """Break a compound request into atomic commands.
@@ -215,21 +275,30 @@ class LLMBackend(ABC):
         local_time: str,
         weekday: str,
         speaker_area: str | None,
+        tools: list[AnswerTool] | None = None,
     ) -> str:
-        """Answer a general or prose question in natural language."""
+        """Answer a general or prose question in natural language.
+
+        With ``tools``, the model may look things up first. A model that does
+        not take tools still answers, without them.
+        """
+        tools = tools if tools and self._tools_supported else []
         system = ANSWER_SYSTEM_PROMPT.format(
             local_time=local_time,
             weekday=weekday,
             speaker_area=speaker_area or "an unknown room",
             home_state=home_state,
+            lookup=ANSWER_LOOKUP_RULE if tools else "",
         )
-        messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         for user_text, assistant_text in history:
             messages.append({"role": "user", "content": user_text})
             if assistant_text:
                 messages.append({"role": "assistant", "content": assistant_text})
         messages.append({"role": "user", "content": utterance})
 
+        if tools:
+            return (await self._answer_with_tools(messages, tools)).strip()
         text, metrics = await self._chat(
             messages,
             max_tokens=ANSWER_MAX_TOKENS,
@@ -238,6 +307,88 @@ class LLMBackend(ABC):
         )
         _log_exchange("answer", self.name, self._model, messages, text, metrics)
         return text.strip()
+
+    async def _answer_with_tools(
+        self, messages: list[dict[str, Any]], tools: list[AnswerTool]
+    ) -> str:
+        """Let the model look things up, a bounded number of times, then answer.
+
+        Each round runs every call the model asked for at once and hands the
+        results back. After MAX_TOOL_ROUNDS the model answers without tools,
+        and the whole exchange shares one deadline so a voice answer cannot
+        stall on a slow search.
+        """
+        by_name = {tool.name: tool for tool in tools}
+        specs = [tool.spec() for tool in tools]
+        deadline = self._answer_timeout + MAX_TOOL_ROUNDS * TOOL_TIMEOUT
+        try:
+            async with asyncio.timeout(deadline):
+                for round_no in range(MAX_TOOL_ROUNDS + 1):
+                    final = round_no == MAX_TOOL_ROUNDS
+                    try:
+                        turn = await self._chat_tools(
+                            messages,
+                            specs,
+                            max_tokens=ANSWER_MAX_TOKENS,
+                            temperature=ANSWER_TEMPERATURE,
+                            timeout=self._answer_timeout,
+                            final=final,
+                        )
+                    except LLMBackendError as err:
+                        if round_no or str(err) not in ("HTTP 400", "HTTP 404"):
+                            raise
+                        # The model or server does not take tools. Answer
+                        # without them, now and until the entry reloads.
+                        LOGGER.warning(
+                            "%s refused a request with tools (%s); answering "
+                            "without web search",
+                            self._model,
+                            err,
+                        )
+                        self._tools_supported = False
+                        return await self._answer_plain(messages)
+                    _log_exchange(
+                        "answer",
+                        self.name,
+                        self._model,
+                        messages,
+                        turn.text,
+                        turn.metrics,
+                    )
+                    if not turn.calls or final:
+                        return turn.text
+                    results = await asyncio.gather(
+                        *(_run(by_name, call) for call in turn.calls)
+                    )
+                    LOGGER.debug(
+                        "Answer round %s looked up %s",
+                        round_no + 1,
+                        ", ".join(
+                            f"{call.name} ({len(result)} chars)"
+                            for call, result in zip(turn.calls, results, strict=True)
+                        ),
+                    )
+                    messages.append(turn.assistant)
+                    messages.extend(
+                        self._tool_result(call, result)
+                        for call, result in zip(turn.calls, results, strict=True)
+                    )
+        except TimeoutError as err:
+            raise LLMBackendError(f"Timed out after {deadline:.0f}s") from err
+        return ""
+
+    async def _answer_plain(self, messages: list[dict[str, Any]]) -> str:
+        """The answer without tools, and without the rule that offers them."""
+        system = messages[0]["content"].replace(ANSWER_LOOKUP_RULE, "")
+        messages = [{"role": "system", "content": system}, *messages[1:]]
+        text, metrics = await self._chat(
+            messages,
+            max_tokens=ANSWER_MAX_TOKENS,
+            temperature=ANSWER_TEMPERATURE,
+            timeout=self._answer_timeout,
+        )
+        _log_exchange("answer", self.name, self._model, messages, text, metrics)
+        return text
 
     async def fill_fields(
         self,
@@ -299,27 +450,14 @@ class OllamaBackend(LLMBackend):
     the integration loads it at startup and pings it to keep it resident. Off by
     default: whether a model sits in memory is the server owner's call."""
 
-    async def _chat(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        max_tokens: int,
-        temperature: float,
-        timeout: float,
-        schema: dict[str, Any] | None = None,
-    ) -> tuple[str, dict[str, Any]]:
-        payload: dict[str, Any] = {
-            "model": self._model,
-            "messages": messages,
-            "stream": False,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
-        }
+    async def _send(
+        self, payload: dict[str, Any], timeout: float
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """POST to /api/chat. Returns the reply message and metrics."""
+        payload = {"model": self._model, "stream": False, **payload}
         if self.keep_loaded:
             # Only on request. Otherwise the server's own idle setting decides.
             payload["keep_alive"] = LLM_KEEP_ALIVE
-        if schema is not None:
-            # Ollama constrains the reply to this JSON schema.
-            payload["format"] = schema
         headers = {}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -328,11 +466,58 @@ class OllamaBackend(LLMBackend):
             self._session, f"{self._base_url}/api/chat", payload, headers, timeout
         )
         elapsed = time.monotonic() - started
-        try:
-            text = data["message"]["content"]
-        except (KeyError, TypeError) as err:
-            raise LLMBackendError("Unexpected response shape from Ollama") from err
-        return text, _ollama_metrics(data, elapsed)
+        message = data.get("message") if isinstance(data, dict) else None
+        if not isinstance(message, dict):
+            raise LLMBackendError("Unexpected response shape from Ollama")
+        return message, _ollama_metrics(data, elapsed)
+
+    async def _chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int,
+        temperature: float,
+        timeout: float,
+        schema: dict[str, Any] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        payload: dict[str, Any] = {
+            "messages": messages,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        if schema is not None:
+            # Ollama constrains the reply to this JSON schema.
+            payload["format"] = schema
+        message, metrics = await self._send(payload, timeout)
+        return str(message.get("content") or ""), metrics
+
+    async def _chat_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int,
+        temperature: float,
+        timeout: float,
+        final: bool = False,
+    ) -> _Turn:
+        payload: dict[str, Any] = {
+            "messages": messages,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        if not final:
+            # Ollama has no tool_choice; leaving the tools out is how to say no.
+            payload["tools"] = tools
+        message, metrics = await self._send(payload, timeout)
+        raw_calls = message.get("tool_calls") or []
+        calls = [] if final else _calls(raw_calls)
+        assistant = {"role": "assistant", "content": message.get("content") or ""}
+        if raw_calls:
+            assistant["tool_calls"] = raw_calls
+        return _Turn(str(message.get("content") or ""), calls, assistant, metrics)
+
+    @staticmethod
+    def _tool_result(call: ToolCall, content: str) -> dict[str, Any]:
+        return {"role": "tool", "content": content, "tool_name": call.name}
 
     async def async_warm_up(self) -> None:
         """Load the model before it is needed, for users who opted in.
@@ -379,7 +564,7 @@ class OpenAICompatBackend(LLMBackend):
 
     async def _chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         max_tokens: int,
         temperature: float,
@@ -387,9 +572,7 @@ class OpenAICompatBackend(LLMBackend):
         schema: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         payload: dict[str, Any] = {
-            "model": self._model,
             "messages": messages,
-            "stream": False,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
@@ -398,6 +581,48 @@ class OpenAICompatBackend(LLMBackend):
                 "type": "json_schema",
                 "json_schema": {"name": "fields", "schema": schema, "strict": False},
             }
+        message, metrics = await self._send(payload, timeout)
+        return str(message.get("content") or ""), metrics
+
+    async def _chat_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int,
+        temperature: float,
+        timeout: float,
+        final: bool = False,
+    ) -> _Turn:
+        payload: dict[str, Any] = {
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            # Earlier turns may hold tool calls, so the tools stay declared;
+            # on the last round the model may no longer call them.
+            "tools": tools,
+            "tool_choice": "none" if final else "auto",
+        }
+        message, metrics = await self._send(payload, timeout)
+        raw_calls = message.get("tool_calls") or []
+        calls = [] if final else _calls(raw_calls)
+        assistant: dict[str, Any] = {
+            "role": "assistant",
+            "content": message.get("content"),
+        }
+        if raw_calls:
+            assistant["tool_calls"] = raw_calls
+        return _Turn(str(message.get("content") or ""), calls, assistant, metrics)
+
+    @staticmethod
+    def _tool_result(call: ToolCall, content: str) -> dict[str, Any]:
+        return {"role": "tool", "tool_call_id": call.id, "content": content}
+
+    async def _send(
+        self, payload: dict[str, Any], timeout: float
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """POST to /v1/chat/completions. Returns the reply message and metrics."""
+        payload = {"model": self._model, "stream": False, **payload}
         headers = {}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -419,10 +644,46 @@ class OpenAICompatBackend(LLMBackend):
             data = await _post_json(self._session, url, payload, headers, timeout)
         elapsed = time.monotonic() - started
         try:
-            text = data["choices"][0]["message"]["content"] or ""
+            message = data["choices"][0]["message"]
         except (KeyError, IndexError, TypeError) as err:
             raise LLMBackendError("Unexpected response shape from the server") from err
-        return text, _openai_metrics(data, elapsed)
+        if not isinstance(message, dict):
+            raise LLMBackendError("Unexpected response shape from the server")
+        return message, _openai_metrics(data, elapsed)
+
+
+def _calls(raw: Any) -> list[ToolCall]:
+    """The tool calls in a reply, normalised.
+
+    OpenAI-style servers send arguments as a JSON string, Ollama as an object;
+    either may be malformed, in which case the call goes ahead with none and
+    the tool reports what it is missing.
+    """
+    calls: list[ToolCall] = []
+    for index, item in enumerate(raw if isinstance(raw, list) else []):
+        function = item.get("function") if isinstance(item, dict) else None
+        if not isinstance(function, dict) or not function.get("name"):
+            continue
+        args = function.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args or "{}")
+            except json.JSONDecodeError, TypeError:
+                args = {}
+        calls.append(
+            ToolCall(
+                id=str(item.get("id") or f"call_{index}"),
+                name=str(function["name"]),
+                args=args if isinstance(args, dict) else {},
+            )
+        )
+    return calls
+
+
+async def _run(by_name: dict[str, AnswerTool], call: ToolCall) -> str:
+    if (tool := by_name.get(call.name)) is None:
+        return f"There is no tool named {call.name}."
+    return await tool.run(call.args)
 
 
 # --- metrics ------------------------------------------------------------
@@ -486,7 +747,7 @@ def _log_exchange(
     operation: str,
     backend: str,
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     reply: str,
     metrics: dict[str, Any],
 ) -> None:

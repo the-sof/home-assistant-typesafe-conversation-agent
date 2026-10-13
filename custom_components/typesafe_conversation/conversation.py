@@ -18,6 +18,7 @@ from .const import (
     CONF_INLINE_ENTITY_DESCRIPTIONS,
     DEFAULT_ALWAYS_CONFIRM_RISKY,
     DOMAIN,
+    WEB_SEARCH_KEYS,
 )
 
 
@@ -108,6 +109,7 @@ class TypeSafeConversationEntity(
                     )
                 ),
                 bypass_local_intents=bool(settings.get(CONF_BYPASS_LOCAL_INTENTS)),
+                web_search={key: settings.get(key) for key in WEB_SEARCH_KEYS},
             ),
             traces=data.traces,
             pending_fills=data.pending_fills,

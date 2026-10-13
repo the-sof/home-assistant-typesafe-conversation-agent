@@ -76,6 +76,17 @@ CONF_INLINE_ENTITY_DESCRIPTIONS: Final = "inline_entity_descriptions"
 CONF_ALWAYS_CONFIRM_RISKY: Final = "always_confirm_risky"
 CONF_LLM_TIMEOUT: Final = "llm_timeout"
 CONF_LLM_KEEP_LOADED: Final = "llm_keep_loaded"
+CONF_WEB_SEARCH: Final = "web_search"
+CONF_WEB_SEARCH_URL: Final = "web_search_url"
+CONF_WEB_SEARCH_API: Final = "web_search_api"
+
+WEB_SEARCH_KEYS: Final = (CONF_WEB_SEARCH, CONF_WEB_SEARCH_URL, CONF_WEB_SEARCH_API)
+
+WEB_SEARCH_OFF: Final = "off"
+WEB_SEARCH_SEARXNG: Final = "searxng"
+WEB_SEARCH_LLM_API: Final = "llm_api"
+"""Any LLM API registered in Home Assistant other than Assist - which is how an
+MCP server added through the Model Context Protocol integration shows up."""
 
 DEFAULT_ALWAYS_CONFIRM_RISKY: Final = True
 """Ask before unlocking or opening the house, however sure the model is.
@@ -121,6 +132,15 @@ PENDING_FILL_SECONDS: Final = 90
 """How long the agent waits for the answer to "What time should I set it for?"."""
 ANSWER_TEMPERATURE: Final = 0.3
 MAX_SUB_COMMANDS: Final = 6
+
+MAX_TOOL_ROUNDS: Final = 2
+"""Rounds of tool calls before the model must answer with what it has."""
+TOOL_TIMEOUT: Final = 8.0
+"""Seconds one lookup may take. A voice answer cannot wait much longer."""
+TOOL_RESULT_MAX_CHARS: Final = 3000
+"""How much of a tool's result goes back to the model. Search results are long,
+and every character is prompt the model has to read before it can answer."""
+SEARCH_RESULTS: Final = 5
 
 PROMPT_LOG_CHARS: Final = 200
 """How much of a system prompt to write to the debug log.

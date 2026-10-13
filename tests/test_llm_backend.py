@@ -1,18 +1,25 @@
-"""The two LLM operations, against mocked HTTP."""
+"""The LLM operations, against mocked HTTP."""
 
 from __future__ import annotations
+
+import copy
 
 import pytest
 from pytest_homeassistant_custom_component.test_util.aiohttp import (
     AiohttpClientMocker,
+    AiohttpClientMockResponse,
     mock_aiohttp_client,
 )
+from yarl import URL
 
+from custom_components.typesafe_conversation.const import MAX_TOOL_ROUNDS
 from custom_components.typesafe_conversation.llm_backend import (
+    ANSWER_LOOKUP_RULE,
     LLMBackendError,
     OllamaBackend,
     OpenAICompatBackend,
 )
+from custom_components.typesafe_conversation.tools import AnswerTool
 
 
 @pytest.fixture(name="mocker")
@@ -476,3 +483,218 @@ async def test_a_follow_up_fill_sees_what_is_settled(session, mocker):
     assert 'Already settled: {"location": "downstairs"}' in request
     assert "You asked for: Time" in request
     assert request.endswith("Now: 5:15")
+
+
+# --- lookup tools on the answer path -------------------------------------------
+# With web search turned on, the answer may call read-only tools first. Each
+# server has its own shape for offering tools, asking for a call and taking the
+# result back; the tests pin each one, and the bounds on the loop.
+
+SEARCH_PARAMS = {
+    "type": "object",
+    "properties": {"query": {"type": "string"}},
+    "required": ["query"],
+}
+
+
+def _search_tool(calls: list, reply="Kickoff is at 7:30 PM.") -> AnswerTool:
+    async def call(args):
+        calls.append(args)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    return AnswerTool("web_search", "Search the web.", SEARCH_PARAMS, call)
+
+
+def _replies(mocker, url: str, bodies: list[dict], sent: list[dict]) -> None:
+    """Answer successive POSTs with ``bodies`` in turn, keeping what was sent.
+
+    The payload is copied as it is sent: the loop goes on appending to the same
+    message list, so the recorded call would otherwise show its final state.
+    """
+    queue = list(bodies)
+
+    async def respond(method, request_url, data):
+        sent.append(copy.deepcopy(data))
+        body = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(body, int):
+            return AiohttpClientMockResponse(method, URL(url), status=body)
+        return AiohttpClientMockResponse(method, URL(url), json=body)
+
+    mocker.post(url, side_effect=respond)
+
+
+async def _ask(backend, tools):
+    return await backend.answer_freeform(
+        "when do the Rovers play tonight?",
+        [],
+        home_state="",
+        local_time="15:00",
+        weekday="Saturday",
+        speaker_area="Kitchen",
+        tools=tools,
+    )
+
+
+def _ollama_call(query: str) -> dict:
+    return {
+        "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": "web_search", "arguments": {"query": query}}}
+            ],
+        }
+    }
+
+
+def _openai_call(query: str, call_id: str = "c1") -> dict:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "web_search",
+                                "arguments": f'{{"query": "{query}"}}',
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+
+async def test_ollama_looks_up_then_answers(session, mocker):
+    backend = OllamaBackend(session, "http://ollama:11434", "qwen")
+    sent, searched = [], []
+    _replies(
+        mocker,
+        "http://ollama:11434/api/chat",
+        [_ollama_call("Rovers kickoff"), _ollama("Kickoff is at 7:30 tonight.")],
+        sent,
+    )
+
+    answer = await _ask(backend, [_search_tool(searched)])
+
+    assert answer == "Kickoff is at 7:30 tonight."
+    assert searched == [{"query": "Rovers kickoff"}]
+    assert sent[0]["tools"][0]["function"]["name"] == "web_search"
+    assert ANSWER_LOOKUP_RULE in sent[0]["messages"][0]["content"]
+    *_, asked, result = sent[1]["messages"]
+    assert asked["tool_calls"][0]["function"]["name"] == "web_search"
+    assert result == {
+        "role": "tool",
+        "content": "Kickoff is at 7:30 PM.",
+        "tool_name": "web_search",
+    }
+
+
+async def test_openai_compatible_looks_up_then_answers(session, mocker):
+    backend = OpenAICompatBackend(session, "https://x.invalid", "m")
+    sent, searched = [], []
+    _replies(
+        mocker,
+        "https://x.invalid/v1/chat/completions",
+        [_openai_call("Rovers kickoff"), _openai("Kickoff is at 7:30 tonight.")],
+        sent,
+    )
+
+    answer = await _ask(backend, [_search_tool(searched)])
+
+    assert answer == "Kickoff is at 7:30 tonight."
+    assert searched == [{"query": "Rovers kickoff"}]
+    assert sent[0]["tool_choice"] == "auto"
+    *_, asked, result = sent[1]["messages"]
+    assert asked["tool_calls"][0]["id"] == "c1"
+    assert result == {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "Kickoff is at 7:30 PM.",
+    }
+
+
+@pytest.mark.parametrize(
+    ("backend_cls", "url", "call", "is_final"),
+    [
+        (
+            OllamaBackend,
+            "http://srv/api/chat",
+            _ollama_call,
+            lambda payload: "tools" not in payload,
+        ),
+        (
+            OpenAICompatBackend,
+            "http://srv/v1/chat/completions",
+            _openai_call,
+            lambda payload: payload["tool_choice"] == "none",
+        ),
+    ],
+)
+async def test_the_model_must_answer_after_the_last_round(
+    session, mocker, backend_cls, url, call, is_final
+):
+    """A model that keeps searching is cut off and answers with what it has."""
+    backend = backend_cls(session, "http://srv", "m")
+    sent, searched = [], []
+    _replies(mocker, url, [call("again")], sent)
+
+    await _ask(backend, [_search_tool(searched)])
+
+    assert len(searched) == MAX_TOOL_ROUNDS
+    assert len(sent) == MAX_TOOL_ROUNDS + 1
+    assert not any(is_final(payload) for payload in sent[:-1])
+    assert is_final(sent[-1])
+
+
+async def test_a_failed_lookup_reaches_the_model_and_it_still_answers(session, mocker):
+    backend = OllamaBackend(session, "http://ollama:11434", "qwen")
+    sent, searched = [], []
+    _replies(
+        mocker,
+        "http://ollama:11434/api/chat",
+        [_ollama_call("Rovers"), _ollama("I couldn't check that just now.")],
+        sent,
+    )
+
+    answer = await _ask(backend, [_search_tool(searched, reply=RuntimeError("boom"))])
+
+    assert answer == "I couldn't check that just now."
+    assert sent[1]["messages"][-1]["content"] == "web_search failed: boom"
+
+
+async def test_a_model_without_tools_still_answers_and_is_not_asked_again(
+    session, mocker
+):
+    backend = OllamaBackend(session, "http://ollama:11434", "small")
+    sent, searched = [], []
+    _replies(mocker, "http://ollama:11434/api/chat", [400, _ollama("Paris.")], sent)
+
+    assert await _ask(backend, [_search_tool(searched)]) == "Paris."
+    retry = sent[1]
+    assert "tools" not in retry
+    assert ANSWER_LOOKUP_RULE not in retry["messages"][0]["content"]
+
+    sent.clear()
+    await _ask(backend, [_search_tool(searched)])
+    assert len(sent) == 1
+    assert "tools" not in sent[0], "the refusal is remembered"
+    assert searched == []
+
+
+async def test_without_tools_the_request_is_unchanged(session, mocker):
+    backend = OllamaBackend(session, "http://ollama:11434", "qwen")
+    mocker.post("http://ollama:11434/api/chat", json=_ollama("ok"))
+
+    await _ask(backend, None)
+
+    payload = mocker.mock_calls[0][2]
+    assert "tools" not in payload
+    assert ANSWER_LOOKUP_RULE not in payload["messages"][0]["content"]

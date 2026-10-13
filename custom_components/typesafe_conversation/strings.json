@@ -66,6 +66,20 @@
           "llm_keep_loaded": "Off by default: the server decides when to unload an idle model, so the first question after a pause waits for it to load. Turn this on to load it at startup and keep it in memory, which makes that first answer fast but holds the memory for as long as Home Assistant runs. Change it any time under Reconfigure. Has no effect on hosted backends.",
           "llm_timeout": "How long to wait for an answer. A large local model that has to load first may need more than the default."
         }
+      },
+      "web_search": {
+        "title": "Web search",
+        "description": "Lets the language model look things up when it answers a question about something current, such as news, schedules, scores or opening hours. It is only offered when answering; device control never uses it.\n\nSearXNG: the address of your instance, for example {searxng_example}. Its settings.yml must list json under search: formats.\n\nA Home Assistant LLM API: pick one that only looks things up, such as a search server added with the Model Context Protocol integration. Assist is never offered here.",
+        "data": {
+          "web_search": "Web search",
+          "web_search_url": "SearXNG address",
+          "web_search_api": "LLM API"
+        },
+        "data_description": {
+          "web_search": "Off by default. The model decides when to search.",
+          "web_search_url": "Only used with SearXNG.",
+          "web_search_api": "Only used with a Home Assistant LLM API."
+        }
       }
     },
     "error": {
@@ -78,7 +92,11 @@
       "llm_cannot_connect_localhost": "Could not reach the language model at localhost. If Home Assistant runs in a container, localhost is the container itself: use the address of the machine running the model.",
       "llm_invalid_auth": "The language model server rejected that API key.",
       "llm_model_not_found": "The server doesn't offer that model. Pick one from the list.",
-      "invalid_url": "That isn't a valid address. Start it with http:// or https://, then the host and port."
+      "invalid_url": "That isn't a valid address. Start it with http:// or https://, then the host and port.",
+      "search_cannot_connect": "Could not search with SearXNG at that address.",
+      "search_json_disabled": "SearXNG refused a JSON search. Add json under search: formats in its settings.yml, then restart it.",
+      "search_no_api": "Home Assistant has no LLM API to offer yet. Add one first, for example a search server through the Model Context Protocol integration.",
+      "search_pick_api": "Pick the LLM API to use."
     },
     "abort": {
       "reauth_successful": "Re-authentication was successful.",
