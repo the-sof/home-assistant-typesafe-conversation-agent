@@ -622,32 +622,36 @@ async def test_openai_compatible_looks_up_then_answers(session, mocker):
 
 
 @pytest.mark.parametrize(
-    ("backend_cls", "url", "call", "is_final"),
+    ("backend_cls", "url", "call", "reply", "is_final"),
     [
         (
             OllamaBackend,
             "http://srv/api/chat",
             _ollama_call,
+            _ollama,
             lambda payload: "tools" not in payload,
         ),
         (
             OpenAICompatBackend,
             "http://srv/v1/chat/completions",
             _openai_call,
+            _openai,
             lambda payload: payload["tool_choice"] == "none",
         ),
     ],
 )
 async def test_the_model_must_answer_after_the_last_round(
-    session, mocker, backend_cls, url, call, is_final
+    session, mocker, backend_cls, url, call, reply, is_final
 ):
     """A model that keeps searching is cut off and answers with what it has."""
     backend = backend_cls(session, "http://srv", "m")
     sent, searched = [], []
-    _replies(mocker, url, [call("again")], sent)
+    rounds = [call("again")] * MAX_TOOL_ROUNDS
+    _replies(mocker, url, [*rounds, reply("Probably 7:30.")], sent)
 
-    await _ask(backend, [_search_tool(searched)])
+    answer = await _ask(backend, [_search_tool(searched)])
 
+    assert answer == "Probably 7:30."
     assert len(searched) == MAX_TOOL_ROUNDS
     assert len(sent) == MAX_TOOL_ROUNDS + 1
     assert not any(is_final(payload) for payload in sent[:-1])

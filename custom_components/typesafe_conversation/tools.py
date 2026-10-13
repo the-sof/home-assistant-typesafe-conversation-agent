@@ -29,7 +29,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from voluptuous_openapi import convert
+
+try:  # Home Assistant 2026.9 moved to probatio; same signature.
+    from probatio import to_openapi
+except ImportError:
+    from voluptuous_openapi import convert as to_openapi
 
 from .const import (
     CONF_WEB_SEARCH,
@@ -217,7 +221,7 @@ async def async_api_tools(
         return AnswerTool(
             name=tool.name,
             description=tool.description or "",
-            parameters=convert(tool.parameters, custom_serializer=serializer),
+            parameters=to_openapi(tool.parameters, custom_serializer=serializer),
             call=call,
         )
 
@@ -231,15 +235,18 @@ async def async_answer_tools(
 ) -> list[AnswerTool]:
     """The tools the configured web search provides, or none.
 
-    A source that has gone away - the MCP integration removed, say - logs a
-    warning and the answer goes ahead without tools.
+    A source that has gone away or stalls - the MCP integration removed, say -
+    logs a warning and the answer goes ahead without tools.
     """
     source = settings.get(CONF_WEB_SEARCH)
     if source == WEB_SEARCH_SEARXNG and (url := settings.get(CONF_WEB_SEARCH_URL)):
         return [searxng_tool(async_get_clientsession(hass), url)]
     if source == WEB_SEARCH_LLM_API and (api_id := settings.get(CONF_WEB_SEARCH_API)):
         try:
-            return await async_api_tools(hass, api_id, user_input)
+            async with asyncio.timeout(TOOL_TIMEOUT):
+                return await async_api_tools(hass, api_id, user_input)
+        except TimeoutError:
+            LOGGER.warning("Web search did not respond; answering without it")
         except HomeAssistantError as err:
             LOGGER.warning("Web search is unavailable (%s); answering without it", err)
     return []

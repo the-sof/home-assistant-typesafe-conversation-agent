@@ -182,6 +182,23 @@ async def test_an_api_that_has_gone_means_no_tools(
     assert "Web search is unavailable" in caplog.text
 
 
+async def test_an_api_that_stalls_means_no_tools(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+):
+    _register(hass)
+    settings = {"web_search": "llm_api", "web_search_api": "lookup"}
+
+    async def stall(*_args):
+        await asyncio.sleep(10)
+
+    with (
+        patch.object(tools_module, "TOOL_TIMEOUT", 0.01),
+        patch.object(tools_module, "async_api_tools", stall),
+    ):
+        assert await async_answer_tools(hass, settings, _user_input()) == []
+    assert "Web search did not respond" in caplog.text
+
+
 @pytest.mark.parametrize(
     "settings",
     [
