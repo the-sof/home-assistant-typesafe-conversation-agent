@@ -18,9 +18,9 @@ A System One model returns typed, calibrated judgements rather than text. Jev is
 the one available today and the default; the integration is not written around
 it, so a later model is a config change. Every device command and state query
 is resolved from those judgements in ordinary Python, in a single API call. An
-LLM is used for exactly two things — splitting a request that contains several
-commands, and answering a general question — so the slow path is only taken when
-something actually has to be written in prose.
+LLM is used only where something has to be written — splitting a request that
+contains several commands, answering a general question, and filling in a
+script's fields — so the slow path is only taken when it is needed.
 
 Measured against the same utterances, this replaces a 2–8 s LLM turn with a
 ~250 ms one for anything that controls or inspects the home.
@@ -42,7 +42,7 @@ route()  ── a pure function over the answers
    ├─ command   → intent.async_handle → your services
    ├─ query     → sentence matcher, then HassGetState / HassClimateGetTemperature
    ├─ compound  → LLM splits it → N parallel Jev calls → run in order
-   ├─ general   → LLM answers in prose
+   ├─ general   → LLM answers in prose, after a web search if it needs one
    └─ unsure    → sentence matcher → LLM → "I'm not sure"
 ```
 
@@ -114,8 +114,10 @@ telemetry of its own, and the optional LLM backend is configured separately —
 point it at Ollama on your own machine and the prose path never leaves the
 house either. When it fills in a [script's fields](#scripts-with-fields), the
 LLM is sent the utterance, that script's name, description and fields, the
-room you are in and the time; not the rest of the home. Diagnostics downloads redact the API key, both server URLs and
-your entity IDs.
+room you are in and the time; not the rest of the home. With
+[web search](#web-search) on, the search queries the model writes go to the
+search you chose. Diagnostics downloads redact the API key, the server and
+search URLs, and your entity IDs.
 
 When you use TypeSafe's hosted API, its handling of what you send is governed by
 their [terms](https://typesafe.ai/legal/mca) and
@@ -250,6 +252,45 @@ and `always_confirm_risky`, `bypass_local_intents` and
 | `llm_timeout` | `30` s | How long to wait for the LLM before giving up. Only the prose path is affected. A large local model that must load first may need more. |
 | `llm_keep_loaded` | off | Ollama only. Load the language model at startup and keep it in memory, so the first general question after a pause is fast. Holds the memory while Home Assistant runs; off leaves unloading to the server. |
 | `llm_referer`, `llm_title` | project defaults | Sent as `HTTP-Referer` and `X-Title`; OpenRouter uses them for attribution. |
+| `web_search` | off | Let the LLM look things up when it answers: `off`, `searxng`, or `llm_api`. See [Web search](#web-search). |
+| `web_search_url` | — | The SearXNG instance. Checked with a real search before it is saved. Redacted in diagnostics. |
+| `web_search_api` | — | The Home Assistant LLM API to take tools from, such as an MCP server. Assist is never offered. |
+
+### Web search
+
+Without it, a question about anything current — tonight's game, the news, a
+shop's hours — gets a guess or "I don't know". Turn it on in the **Web search**
+step under **Reconfigure**, after the language model, and pick where lookups
+come from:
+
+- **SearXNG** — a self-hosted metasearch engine. Queries reach the engines it
+  uses without an account or key, and nothing is logged. Its `settings.yml`
+  must allow JSON, which it does not by default:
+
+  ```yaml
+  search:
+    formats:
+      - html
+      - json
+  ```
+
+- **A Home Assistant LLM API** — anything registered with Home Assistant other
+  than Assist. Add a search provider's MCP server with the
+  [Model Context Protocol](https://www.home-assistant.io/integrations/mcp/)
+  integration and it appears here. Pick one whose tools only look things up:
+  every tool it offers is given to the model.
+
+The model decides when to search; stable general knowledge is answered without
+one. Lookups are only offered when answering a question — commands still go
+through Jev and never reach a tool — and a lookup that fails or takes more
+than 8 s is reported to the model, which says it could not check. The language
+model has to support tool calls (Qwen3, Llama 3.1 and later, GPT-4-class and
+DeepSeek V3 models do); one that refuses them is answered without, and not
+asked again until the integration reloads.
+
+Some models search on their own, such as Perplexity's Sonar models or any
+OpenRouter model with `:online` appended. Choosing one as `llm_model` needs no
+web search setting at all, at the cost of a search on every general question.
 
 ### Scripts with fields
 
