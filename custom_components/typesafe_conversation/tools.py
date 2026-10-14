@@ -101,18 +101,38 @@ def normalise_searxng_url(url: str) -> str:
     return url.removesuffix("/search").rstrip("/")
 
 
+SEARCH_CATEGORIES = ("general", "news", "weather")
+"""What the model may ask SearXNG for. News ranks recent articles; weather is
+answered by an engine such as Open-Meteo, which geocodes the whole query - so
+a weather search sends the place alone."""
+
+
+@dataclass(frozen=True, slots=True)
+class SearchResults:
+    """SearXNG's direct answers, then its ordinary results."""
+
+    answers: list[str]
+    results: list[dict[str, str]]
+
+
 async def async_searxng_search(
-    session: aiohttp.ClientSession, base_url: str, query: str
-) -> list[dict[str, str]]:
-    """The top results for a query: title, snippet and address.
+    session: aiohttp.ClientSession,
+    base_url: str,
+    query: str,
+    category: str = "general",
+) -> SearchResults:
+    """The direct answers and top results for a query.
 
     Raises SearchError with ``"json_disabled"`` when the instance refuses JSON,
     which SearXNG does until ``json`` is added to ``search.formats``.
     """
+    params = {"q": query, "format": "json"}
+    if category != "general":
+        params["categories"] = category
     try:
         async with session.get(
             f"{base_url}/search",
-            params={"q": query, "format": "json"},
+            params=params,
             timeout=aiohttp.ClientTimeout(total=TOOL_TIMEOUT),
             allow_redirects=False,
         ) as response:
@@ -128,15 +148,55 @@ async def async_searxng_search(
     items = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(items, list):
         raise SearchError("unexpected response")
-    return [
-        {
-            "title": str(item.get("title") or ""),
-            "snippet": str(item.get("content") or ""),
-            "url": str(item.get("url") or ""),
-        }
-        for item in items[:SEARCH_RESULTS]
-        if isinstance(item, dict)
-    ]
+    return SearchResults(
+        answers=_answers(payload),
+        results=[
+            {
+                "title": str(item.get("title") or ""),
+                "snippet": str(item.get("content") or ""),
+                "url": str(item.get("url") or ""),
+            }
+            for item in items[:SEARCH_RESULTS]
+            if isinstance(item, dict)
+        ],
+    )
+
+
+def _answers(payload: dict[str, Any]) -> list[str]:
+    """SearXNG's direct answers and first infobox, as lines.
+
+    An answer is a plain string on older versions and a dict on newer ones; a
+    weather answer carries the current conditions and an hourly forecast.
+    """
+    lines: list[str] = []
+    for answer in payload.get("answers") or []:
+        if isinstance(answer, str):
+            lines.append(f"Answer: {answer}")
+        elif isinstance(answer, dict) and isinstance(answer.get("current"), dict):
+            lines.extend(_weather(answer))
+        elif isinstance(answer, dict) and answer.get("answer"):
+            lines.append(f"Answer: {answer['answer']}")
+    infoboxes = payload.get("infoboxes") or []
+    if infoboxes and isinstance(box := infoboxes[0], dict) and box.get("content"):
+        lines.append(f"{box.get('infobox') or 'About'}: {box['content']}")
+    return lines
+
+
+def _weather(answer: dict[str, Any]) -> list[str]:
+    """Now, then every third hour of the forecast - enough to say tomorrow's.
+
+    Each summary starts with the place's name; it is kept once, on the first
+    line, so the model reads the forecast rather than the name sixteen times.
+    """
+    now = str(answer["current"].get("summary") or "")
+    place = str((answer["current"].get("location") or {}).get("name") or "")
+    lines = [f"Weather now: {now}"]
+    for hour in (answer.get("forecasts") or [])[::3]:
+        when = (hour.get("datetime") or {}).get("datetime")
+        summary = str(hour.get("summary") or "")
+        if when and summary:
+            lines.append(f"{when}: {summary.removeprefix(f'{place}: ')}")
+    return lines
 
 
 def searxng_tool(session: aiohttp.ClientSession, base_url: str) -> AnswerTool:
@@ -146,25 +206,47 @@ def searxng_tool(session: aiohttp.ClientSession, base_url: str) -> AnswerTool:
         query = str(args.get("query") or "").strip()
         if not query:
             return "web_search failed: no query given"
+        category = args.get("category")
+        if category not in SEARCH_CATEGORIES:
+            category = "general"
+        if category == "weather":
+            query = str(args.get("place") or "").strip() or query
         try:
-            results = await async_searxng_search(session, base_url, query)
+            found = await async_searxng_search(session, base_url, query, category)
         except SearchError as err:
             return f"web_search failed: {err}"
-        if not results:
-            return "No results."
-        return "\n".join(f"{r['title']} - {r['snippet']} ({r['url']})" for r in results)
+        lines = found.answers + [
+            f"{r['title']} - {r['snippet']} ({r['url']})" for r in found.results
+        ]
+        return "\n".join(lines) if lines else "No results."
 
     return AnswerTool(
         name="web_search",
         description=(
             "Search the web for current information: news, events, schedules, "
-            "scores, prices, opening hours, or anything that may have changed "
-            "recently. Returns the top results as title, snippet and address."
+            "scores, prices, weather, opening hours, or anything that may have "
+            "changed recently. Returns any direct answer first, then the top "
+            "results as title, snippet and address."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "What to search for."}
+                "query": {"type": "string", "description": "What to search for."},
+                "category": {
+                    "type": "string",
+                    "enum": list(SEARCH_CATEGORIES),
+                    "description": (
+                        "weather for conditions or a forecast, news for recent "
+                        "events, general otherwise."
+                    ),
+                },
+                "place": {
+                    "type": "string",
+                    "description": (
+                        "For weather: only the place's name, such as Boston or "
+                        "Paris, France."
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -255,6 +337,7 @@ async def async_answer_tools(
 __all__ = [
     "AnswerTool",
     "SearchError",
+    "SearchResults",
     "async_answer_tools",
     "async_searxng_search",
     "lookup_apis",

@@ -70,6 +70,68 @@ async def test_searxng_returns_the_top_results_as_lines(
     assert url.query == {"q": "rovers kickoff", "format": "json"}
 
 
+async def test_direct_answers_come_before_the_results(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    payload = _results(1) | {
+        "answers": ["1 USD = 0.92 EUR", {"answer": "42"}, {"url": None}],
+        "infoboxes": [{"infobox": "Lima", "content": "Lima is the capital of Peru."}],
+    }
+    aioclient_mock.get(SEARCH_URL, json=payload)
+    tool = searxng_tool(async_get_clientsession(hass), SEARX)
+
+    lines = (await tool.run({"query": "x"})).splitlines()
+
+    assert lines == [
+        "Answer: 1 USD = 0.92 EUR",
+        "Answer: 42",
+        "Lima: Lima is the capital of Peru.",
+        "Result 0 - Snippet 0 (https://example.invalid/0)",
+    ]
+
+
+async def test_a_weather_search_gives_the_forecast(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """Open-Meteo answers hourly; every third hour is plenty for a day."""
+    forecasts = [
+        {
+            "datetime": {"datetime": f"2026-10-14T{h:02d}:00:00"},
+            "summary": f"Boston: {h} C",
+        }
+        for h in range(7)
+    ]
+    current = {"location": {"name": "Boston"}, "summary": "Boston: 14 C, Cloudy"}
+    weather = {"current": current, "forecasts": forecasts}
+    aioclient_mock.get(SEARCH_URL, json={"results": [], "answers": [weather]})
+    tool = searxng_tool(async_get_clientsession(hass), SEARX)
+
+    text = await tool.run(
+        {"query": "Boston forecast tomorrow", "category": "weather", "place": "Boston"}
+    )
+
+    assert text.splitlines() == [
+        "Weather now: Boston: 14 C, Cloudy",
+        "2026-10-14T00:00:00: 0 C",
+        "2026-10-14T03:00:00: 3 C",
+        "2026-10-14T06:00:00: 6 C",
+    ]
+    _method, url, _data, _headers = aioclient_mock.mock_calls[0]
+    assert url.query == {"q": "Boston", "format": "json", "categories": "weather"}
+
+
+async def test_an_unknown_category_is_a_general_search(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    aioclient_mock.get(SEARCH_URL, json=_results(1))
+    tool = searxng_tool(async_get_clientsession(hass), SEARX)
+
+    await tool.run({"query": "x", "category": "images"})
+
+    _method, url, _data, _headers = aioclient_mock.mock_calls[0]
+    assert "categories" not in url.query
+
+
 async def test_searxng_without_json_output_says_so(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):

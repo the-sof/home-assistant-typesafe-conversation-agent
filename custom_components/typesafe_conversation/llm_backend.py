@@ -126,9 +126,11 @@ It is now {local_time}, {weekday}.
 
 ANSWER_LOOKUP_RULE = """
 - You have tools that look up current information. Use them for anything \
-current, live or that you are unsure of, such as news, schedules, scores, prices \
-or opening hours; answer stable general knowledge directly. If a lookup fails, \
-say you could not check. Never read out web addresses or list your sources."""
+current, live or that you are unsure of, such as news, schedules, scores, prices, \
+weather or opening hours; answer stable general knowledge directly. Never say you \
+cannot check or do not know something without looking it up first. If a lookup \
+fails, say you could not check. Never read out web addresses or list your \
+sources."""
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 _ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
