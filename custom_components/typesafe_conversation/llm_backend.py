@@ -80,7 +80,8 @@ You are the voice assistant for a Home Assistant smart home.
 
 - Reply in plain spoken text. No markdown, no bullet lists, no emoji, no \
 headings.
-- Do not cite sources or add links, unless the user asks for a link.
+- Do not cite sources or add links. If the user asks for a link, give the \
+full address as plain text, never as a markdown link.
 - Reply in the language the user spoke in.
 - Be brief: one or two sentences, under 40 words, as if speaking aloud.
 - You cannot control any device in this mode. Never claim to have turned \
@@ -142,9 +143,6 @@ _LINK_RE = re.compile(_LINK)
 # A citation in brackets, or one or more trailing a finished sentence.
 _CITED_GROUP_RE = re.compile(rf"\s*\((?:\s*{_LINK}[\s,;]*)+\)")
 _CITED_TAIL_RE = re.compile(rf"(?<=[.!?])(?:\s*{_LINK})+(?=\s|$)")
-_ASKS_FOR_LINK_RE = re.compile(
-    r"\b(?:links?|urls?|website|web ?site|web address|webpage)\b", re.IGNORECASE
-)
 
 
 class LLMBackendError(Exception):
@@ -333,7 +331,7 @@ class LLMBackend(ABC):
                 timeout=self._answer_timeout,
             )
             _log_exchange("answer", self.name, self._model, messages, text, metrics)
-        return spoken(text, keep_links=bool(_ASKS_FOR_LINK_RE.search(utterance)))
+        return spoken(text)
 
     async def _answer_with_tools(
         self, messages: list[dict[str, Any]], tools: list[AnswerTool]
@@ -889,26 +887,26 @@ def _all_citations(text: str) -> bool:
     return all(_is_citation(label, url) for label, url in _LINK_RE.findall(text))
 
 
-def spoken(text: str, *, keep_links: bool = False) -> str:
+def spoken(text: str) -> str:
     """The answer as it should be said: no markdown links, no source credits.
 
     Some providers add their own web search and tell the model to cite it as
     markdown links, which would be read aloud. Credits standing apart from the
     sentence (in brackets, or after it ends) are dropped; one inside a sentence
-    becomes the site's name. Any other link keeps its address, as does every
-    link when the user asked for one.
+    becomes the site's name. Any other link keeps its address. A link the user
+    asked for is not touched: the prompt has the model give it as plain text,
+    which works whatever language the request was in.
     """
-    if not keep_links:
-        for pattern in (_CITED_GROUP_RE, _CITED_TAIL_RE):
-            text = pattern.sub(
-                lambda m: "" if _all_citations(m.group(0)) else m.group(0), text
-            )
+    for pattern in (_CITED_GROUP_RE, _CITED_TAIL_RE):
+        text = pattern.sub(
+            lambda m: "" if _all_citations(m.group(0)) else m.group(0), text
+        )
 
     def plain(match: re.Match[str]) -> str:
         label, url = match.group(1).strip(), match.group(2)
         if label == url:
             return url
-        if _is_citation(label, url) and not keep_links:
+        if _is_citation(label, url):
             return label
         return f"{label} ({url})"
 

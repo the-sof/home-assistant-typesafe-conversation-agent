@@ -297,8 +297,8 @@ Some models search on their own, such as Perplexity's Sonar models or any
 OpenRouter model with `:online` appended (type the full name in the model
 field and pick it as a custom item). Choosing one as `llm_model` needs no web
 search setting at all, at the cost of a search on every general question. The
-source links such models add are dropped before the answer is spoken, unless
-the question asked for a link.
+source links such models add are dropped before the answer is spoken; a link
+you ask for is given as a plain address.
 
 ### Scripts with fields
 

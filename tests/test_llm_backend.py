@@ -741,26 +741,14 @@ def test_links_are_made_speakable_and_credits_dropped(raw, expected):
     assert spoken(raw) == expected
 
 
-def test_a_link_the_user_asked_for_keeps_its_address():
-    raw = f"The guide is at [docs.example.org]({DOCS})."
+def test_a_link_given_as_plain_text_is_left_alone():
+    """The prompt has the model give a link it was asked for as plain text."""
+    raw = f"The guide is at {DOCS} and on docs.example.org."
 
-    assert spoken(raw) == "The guide is at docs.example.org."
-    assert spoken(raw, keep_links=True) == f"The guide is at docs.example.org ({DOCS})."
+    assert spoken(raw) == raw
 
 
-@pytest.mark.parametrize(
-    ("utterance", "expected"),
-    [
-        ("what is bitcoin at?", "About $81,800."),
-        (
-            "give me a link for the bitcoin price",
-            f"About $81,800. coingecko.com ({BTC})",
-        ),
-    ],
-)
-async def test_the_answer_is_cleaned_unless_a_link_was_asked_for(
-    session, mocker, utterance, expected
-):
+async def test_the_answer_is_spoken_without_its_source_links(session, mocker):
     backend = OpenAICompatBackend(session, "https://x.invalid", "m:online")
     mocker.post(
         "https://x.invalid/v1/chat/completions",
@@ -768,7 +756,7 @@ async def test_the_answer_is_cleaned_unless_a_link_was_asked_for(
     )
 
     answer = await backend.answer_freeform(
-        utterance,
+        "what is bitcoin at?",
         [],
         home_state="",
         local_time="10:00",
@@ -776,7 +764,9 @@ async def test_the_answer_is_cleaned_unless_a_link_was_asked_for(
         speaker_area=None,
     )
 
-    assert answer == expected
+    assert answer == "About $81,800."
+    prompt = mocker.mock_calls[0][2]["messages"][0]["content"]
+    assert "never as a markdown link" in prompt
 
 
 @pytest.mark.parametrize(
