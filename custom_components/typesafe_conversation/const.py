@@ -109,6 +109,10 @@ DEFAULT_LLM_REFERER: Final = (
     "https://github.com/the-sof/home-assistant-typesafe-conversation-agent"
 )
 DEFAULT_LLM_TITLE: Final = "HA TypeSafe Conversation"
+MODEL_VARIANTS: Final = frozenset(
+    {"online", "nitro", "floor", "free", "extended", "thinking", "exacto"}
+)
+"""OpenRouter's documented variant suffixes, as in ``vendor/model:online``."""
 
 # --- LLM behaviour -----------------------------------------------------------
 SPLIT_TIMEOUT: Final = 4.0

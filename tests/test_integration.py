@@ -1139,6 +1139,27 @@ async def test_an_openrouter_variant_of_a_listed_model_is_accepted(
     assert entry.data["llm_model"] == "a/model:online"
 
 
+async def test_a_misspelt_variant_is_rejected(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    _entry, result = await _to_llm_step(hass, aioclient_mock)
+    aioclient_mock.get(
+        "https://openrouter.ai/api/v1/models", json={"data": [{"id": "a/model"}]}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "openai_compatible"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            "llm_base_url": "https://openrouter.ai/api",
+            "llm_model": "a/model:onlien",
+            "llm_api_key": "sk-or",
+        },
+    )
+    assert result["errors"] == {"llm_model": "llm_model_not_found"}
+
+
 async def test_an_ollama_tag_must_itself_be_installed(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):

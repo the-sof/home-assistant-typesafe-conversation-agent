@@ -37,6 +37,7 @@ from .const import (
     LOGGER,
     MAX_SUB_COMMANDS,
     MAX_TOOL_ROUNDS,
+    MODEL_VARIANTS,
     PROMPT_LOG_CHARS,
     SPLIT_MAX_TOKENS,
     SPLIT_TIMEOUT,
@@ -966,15 +967,18 @@ def offers_model(backend: str, model: str, models: list[str]) -> bool:
     """Whether the server's list covers the model asked for.
 
     OpenRouter lists ``vendor/model`` but also serves variants of it such as
-    ``vendor/model:online`` that it never lists. On Ollama the part after the
-    colon is a tag naming a different download, so it must be listed itself.
+    ``vendor/model:online`` that it never lists. Only its documented suffixes
+    pass, so a misspelt one fails here rather than on the first question. On
+    Ollama the part after the colon is a tag naming a different download, so
+    it must be listed itself.
     """
     if any(same_model(model, m) for m in models):
         return True
-    base, sep, _variant = model.strip().rpartition(":")
+    base, _sep, variant = model.strip().rpartition(":")
     return (
         backend == BACKEND_OPENAI_COMPAT
-        and bool(sep and base)
+        and variant in MODEL_VARIANTS
+        and bool(base)
         and any(same_model(base, m) for m in models)
     )
 
