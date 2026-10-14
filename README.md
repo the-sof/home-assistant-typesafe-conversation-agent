@@ -274,11 +274,16 @@ come from:
       - json
   ```
 
+  SearXNG's direct answers and infoboxes reach the model ahead of the
+  results. For weather, the model searches SearXNG's weather category, which
+  the default `openmeteo` engine answers with a forecast; keep it enabled.
+
 - **A Home Assistant LLM API** — anything registered with Home Assistant other
   than Assist. Add a search provider's MCP server with the
   [Model Context Protocol](https://www.home-assistant.io/integrations/mcp/)
   integration and it appears here. Pick one whose tools only look things up:
-  every tool it offers is given to the model.
+  every tool it offers is given to the model. Until one is set up, the option
+  says so and there is nothing to pick.
 
 The model decides when to search; stable general knowledge is answered without
 one. Lookups are only offered when answering a question — commands still go
@@ -289,8 +294,9 @@ DeepSeek V3 models do); one that refuses them is answered without, and not
 asked again until the integration reloads.
 
 Some models search on their own, such as Perplexity's Sonar models or any
-OpenRouter model with `:online` appended. Choosing one as `llm_model` needs no
-web search setting at all, at the cost of a search on every general question.
+OpenRouter model with `:online` appended (type the full name in the model
+field and pick it as a custom item). Choosing one as `llm_model` needs no web
+search setting at all, at the cost of a search on every general question.
 
 ### Scripts with fields
 
