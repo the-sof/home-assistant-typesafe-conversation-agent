@@ -109,10 +109,6 @@ DEFAULT_LLM_REFERER: Final = (
     "https://github.com/the-sof/home-assistant-typesafe-conversation-agent"
 )
 DEFAULT_LLM_TITLE: Final = "HA TypeSafe Conversation"
-MODEL_VARIANTS: Final = frozenset(
-    {"online", "nitro", "floor", "free", "extended", "thinking", "exacto"}
-)
-"""OpenRouter's documented variant suffixes, as in ``vendor/model:online``."""
 
 # --- LLM behaviour -----------------------------------------------------------
 SPLIT_TIMEOUT: Final = 4.0
@@ -129,6 +125,8 @@ smaller model - this path is only used for prose, so it does not need to be
 the same model you would pick for reasoning."""
 SPLIT_MAX_TOKENS: Final = 200
 ANSWER_MAX_TOKENS: Final = 180
+CHECK_MAX_TOKENS: Final = 16
+"""The test request at setup only needs the server to accept the model."""
 FILL_MAX_TOKENS: Final = 300
 """Room for a script's field values as JSON; they are short."""
 SCRIPT_REPLY_SECONDS: Final = 10.0

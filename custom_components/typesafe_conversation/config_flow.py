@@ -73,6 +73,7 @@ from .llm_backend import (
     LLMAuthError,
     LLMBackendError,
     async_list_models,
+    create_backend,
     normalise_llm_url,
     offers_model,
 )
@@ -486,6 +487,7 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
         backend = self._llm_backend
         errors: dict[str, str] = {}
         models: list[str] | None = None
+        reason = ""
         if user_input is not None:
             url = normalise_llm_url(backend, user_input[CONF_LLM_BASE_URL])
             key = user_input.get(CONF_LLM_API_KEY) or None
@@ -514,6 +516,21 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
                 and not offers_model(backend, model, models)
             ):
                 errors[CONF_LLM_MODEL] = "llm_model_not_found"
+            if not errors and backend == BACKEND_OPENAI_COMPAT:
+                # Ollama's list names exactly what is installed, and a test
+                # there would load the model, which can take minutes. A hosted
+                # server's list says nothing about variants or what the key
+                # may use, so ask the model once.
+                llm = create_backend(
+                    async_get_clientsession(self.hass),
+                    {**user_input, CONF_LLM_BACKEND: backend, CONF_LLM_BASE_URL: url},
+                )
+                try:
+                    if llm is not None:
+                        await llm.async_check_model()
+                except LLMBackendError as err:
+                    errors[CONF_LLM_MODEL] = "llm_model_rejected"
+                    reason = str(err)
             if not errors:
                 # Replace rather than merge, so clearing a field (or switching
                 # keep-loaded off) on reconfigure actually takes effect.
@@ -543,7 +560,7 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
                 _llm_settings_schema(backend, self._data, models), user_input or {}
             ),
             errors=errors,
-            description_placeholders=_LLM_EXAMPLES,
+            description_placeholders={**_LLM_EXAMPLES, "reason": reason},
         )
 
     async def async_step_web_search(

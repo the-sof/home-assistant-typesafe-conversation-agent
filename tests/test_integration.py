@@ -989,6 +989,10 @@ async def _to_llm_step(hass, aioclient_mock):
     return entry, result
 
 
+_OPENROUTER_CHAT = "https://openrouter.ai/api/v1/chat/completions"
+_CHAT_OK = {"choices": [{"message": {"role": "assistant", "content": "OK"}}]}
+
+
 def _default(result, key):
     return next(k for k in result["data_schema"].schema if k == key).default()
 
@@ -1013,6 +1017,7 @@ async def test_a_pasted_v1_address_is_accepted_and_trimmed(
     aioclient_mock.get(
         "https://openrouter.ai/api/v1/models", json={"data": [{"id": "a/model"}]}
     )
+    aioclient_mock.post(_OPENROUTER_CHAT, json=_CHAT_OK)
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"llm_backend": "openai_compatible"}
     )
@@ -1120,6 +1125,7 @@ async def test_an_openrouter_variant_of_a_listed_model_is_accepted(
     aioclient_mock.get(
         "https://openrouter.ai/api/v1/models", json={"data": [{"id": "a/model"}]}
     )
+    aioclient_mock.post(_OPENROUTER_CHAT, json=_CHAT_OK)
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"llm_backend": "openai_compatible"}
     )
@@ -1137,15 +1143,19 @@ async def test_an_openrouter_variant_of_a_listed_model_is_accepted(
     await hass.async_block_till_done()
     assert result["reason"] == "reconfigure_successful"
     assert entry.data["llm_model"] == "a/model:online"
+    [sent] = [c[2] for c in aioclient_mock.mock_calls if str(c[1]) == _OPENROUTER_CHAT]
+    assert sent["model"] == "a/model:online", "the variant itself was tried"
 
 
-async def test_a_misspelt_variant_is_rejected(
+async def test_a_model_the_server_refuses_is_caught_at_setup(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):
+    """A misspelt variant passes the list but not a test request."""
     _entry, result = await _to_llm_step(hass, aioclient_mock)
     aioclient_mock.get(
         "https://openrouter.ai/api/v1/models", json={"data": [{"id": "a/model"}]}
     )
+    aioclient_mock.post(_OPENROUTER_CHAT, status=400)
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"llm_backend": "openai_compatible"}
     )
@@ -1157,7 +1167,8 @@ async def test_a_misspelt_variant_is_rejected(
             "llm_api_key": "sk-or",
         },
     )
-    assert result["errors"] == {"llm_model": "llm_model_not_found"}
+    assert result["errors"] == {"llm_model": "llm_model_rejected"}
+    assert result["description_placeholders"]["reason"] == "HTTP 400"
 
 
 async def test_an_ollama_tag_must_itself_be_installed(

@@ -32,12 +32,12 @@ from .const import (
     ANSWER_TIMEOUT,
     BACKEND_OLLAMA,
     BACKEND_OPENAI_COMPAT,
+    CHECK_MAX_TOKENS,
     FILL_MAX_TOKENS,
     LLM_KEEP_ALIVE,
     LOGGER,
     MAX_SUB_COMMANDS,
     MAX_TOOL_ROUNDS,
-    MODEL_VARIANTS,
     PROMPT_LOG_CHARS,
     SPLIT_MAX_TOKENS,
     SPLIT_TIMEOUT,
@@ -186,6 +186,20 @@ class LLMBackend(ABC):
 
     async def async_warm_up(self) -> None:  # noqa: B027 - optional hook
         """Load the model ahead of need. Only Ollama does anything with this."""
+
+    async def async_check_model(self) -> None:
+        """Send the model one tiny request, so setup finds out if it is refused.
+
+        A listed model can still be one the key may not use, and a variant
+        such as ``vendor/model:online`` is never listed. Raises LLMBackendError
+        when the server refuses it.
+        """
+        await self._chat(
+            [{"role": "user", "content": "Reply with OK."}],
+            max_tokens=CHECK_MAX_TOKENS,
+            temperature=0,
+            timeout=self._answer_timeout,
+        )
 
     @abstractmethod
     async def _chat(
@@ -967,18 +981,16 @@ def offers_model(backend: str, model: str, models: list[str]) -> bool:
     """Whether the server's list covers the model asked for.
 
     OpenRouter lists ``vendor/model`` but also serves variants of it such as
-    ``vendor/model:online`` that it never lists. Only its documented suffixes
-    pass, so a misspelt one fails here rather than on the first question. On
-    Ollama the part after the colon is a tag naming a different download, so
-    it must be listed itself.
+    ``vendor/model:online`` that it never lists; setup then sends the model a
+    test request, which a misspelt variant fails. On Ollama the part after the
+    colon is a tag naming a different download, so it must be listed itself.
     """
     if any(same_model(model, m) for m in models):
         return True
-    base, _sep, variant = model.strip().rpartition(":")
+    base, sep, _variant = model.strip().rpartition(":")
     return (
         backend == BACKEND_OPENAI_COMPAT
-        and variant in MODEL_VARIANTS
-        and bool(base)
+        and bool(sep and base)
         and any(same_model(base, m) for m in models)
     )
 

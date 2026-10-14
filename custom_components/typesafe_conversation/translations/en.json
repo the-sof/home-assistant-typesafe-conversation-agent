@@ -92,6 +92,7 @@
       "llm_cannot_connect_localhost": "Could not reach the language model at localhost. If Home Assistant runs in a container, localhost is the container itself: use the address of the machine running the model.",
       "llm_invalid_auth": "The language model server rejected that API key.",
       "llm_model_not_found": "The server doesn't offer that model. Pick one from the list.",
+      "llm_model_rejected": "The server refused a test request for this model ({reason}). Check the name, and that your key may use it.",
       "invalid_url": "That isn't a valid address. Start it with http:// or https://, then the host and port.",
       "search_cannot_connect": "Could not search with SearXNG at that address.",
       "search_json_disabled": "SearXNG refused a JSON search. Add json under search: formats in its settings.yml, then restart it.",
