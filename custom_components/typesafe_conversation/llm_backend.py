@@ -960,6 +960,23 @@ def same_model(a: str, b: str) -> bool:
     return bare(a) == bare(b)
 
 
+def offers_model(backend: str, model: str, models: list[str]) -> bool:
+    """Whether the server's list covers the model asked for.
+
+    OpenRouter lists ``vendor/model`` but also serves variants of it such as
+    ``vendor/model:online`` that it never lists. On Ollama the part after the
+    colon is a tag naming a different download, so it must be listed itself.
+    """
+    if any(same_model(model, m) for m in models):
+        return True
+    base, sep, _variant = model.strip().rpartition(":")
+    return (
+        backend == BACKEND_OPENAI_COMPAT
+        and bool(sep and base)
+        and any(same_model(base, m) for m in models)
+    )
+
+
 def create_backend(
     session: aiohttp.ClientSession, settings: dict[str, Any]
 ) -> LLMBackend | None:

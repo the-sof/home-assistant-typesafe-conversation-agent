@@ -82,6 +82,9 @@ CONF_WEB_SEARCH_API: Final = "web_search_api"
 
 WEB_SEARCH_KEYS: Final = (CONF_WEB_SEARCH, CONF_WEB_SEARCH_URL, CONF_WEB_SEARCH_API)
 
+DEFAULT_SEARXNG_URL: Final = "http://localhost:8888"
+"""Shown in the address field as an example; only saved if SearXNG is chosen."""
+
 WEB_SEARCH_OFF: Final = "off"
 WEB_SEARCH_SEARXNG: Final = "searxng"
 WEB_SEARCH_LLM_API: Final = "llm_api"

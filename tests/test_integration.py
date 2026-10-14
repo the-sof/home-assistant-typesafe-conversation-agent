@@ -1112,6 +1112,52 @@ async def test_choosing_no_language_model_clears_it(
     assert "web_search_url" not in entry.data
 
 
+async def test_an_openrouter_variant_of_a_listed_model_is_accepted(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """OpenRouter serves a/model:online without listing it."""
+    entry, result = await _to_llm_step(hass, aioclient_mock)
+    aioclient_mock.get(
+        "https://openrouter.ai/api/v1/models", json={"data": [{"id": "a/model"}]}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "openai_compatible"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            "llm_base_url": "https://openrouter.ai/api",
+            "llm_model": "a/model:online",
+            "llm_api_key": "sk-or",
+        },
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"web_search": "off"}
+    )
+    await hass.async_block_till_done()
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data["llm_model"] == "a/model:online"
+
+
+async def test_an_ollama_tag_must_itself_be_installed(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """On Ollama qwen3:30b is a different download from qwen3."""
+    _entry, result = await _to_llm_step(hass, aioclient_mock)
+    for host in ("ollama.box", "localhost"):
+        aioclient_mock.get(
+            f"http://{host}:11434/api/tags", json={"models": [{"name": "qwen3"}]}
+        )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "ollama"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"llm_base_url": "http://ollama.box:11434", "llm_model": "qwen3:30b"},
+    )
+    assert result["errors"] == {"llm_model": "llm_model_not_found"}
+
+
 async def test_a_server_with_no_models_rejects_any_model(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):
@@ -1227,11 +1273,38 @@ async def test_a_searxng_that_cannot_search_is_not_saved(
     assert result["errors"] == {"web_search_url": error}
 
 
+def _field(result, key):
+    return next(k for k in result["data_schema"].schema if k == key)
+
+
+async def test_the_searxng_address_starts_with_an_example_saved_only_if_used(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    entry, result = await _to_web_search_step(hass, aioclient_mock)
+    assert _field(result, "web_search_url").description == {
+        "suggested_value": "http://localhost:8888"
+    }
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"web_search": "off", "web_search_url": "http://localhost:8888"},
+    )
+    await hass.async_block_till_done()
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data["web_search"] == "off"
+    assert "web_search_url" not in entry.data
+
+
 async def test_without_an_llm_api_there_is_none_to_pick(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):
     _entry, result = await _to_web_search_step(hass, aioclient_mock)
     assert "web_search_api" not in result["data_schema"].schema
+    selector = result["data_schema"].schema[_field(result, "web_search")]
+    labels = [option["label"] for option in selector.config["options"]]
+    assert "A Home Assistant LLM API (none set up yet)" in labels
+    assert "Model Context Protocol" in result["description_placeholders"]["apis_note"]
 
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"web_search": "llm_api"}
@@ -1250,6 +1323,7 @@ async def test_an_llm_api_can_be_picked_but_never_assist(
     )
     offered = [option["value"] for option in selector.config["options"]]
     assert offered == ["search"]
+    assert result["description_placeholders"]["apis_note"] == "Available: Search."
 
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"web_search": "llm_api", "web_search_api": "search"}

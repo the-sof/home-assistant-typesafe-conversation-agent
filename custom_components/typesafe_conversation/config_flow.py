@@ -58,6 +58,7 @@ from .const import (
     DEFAULT_MODEL,
     DEFAULT_OLLAMA_URL,
     DEFAULT_OPENAI_COMPAT_URL,
+    DEFAULT_SEARXNG_URL,
     DOMAIN,
     LOGGER,
     MEASURE_UTTERANCE,
@@ -73,7 +74,7 @@ from .llm_backend import (
     LLMBackendError,
     async_list_models,
     normalise_llm_url,
-    same_model,
+    offers_model,
 )
 from .system_one import (
     ServerProfile,
@@ -129,7 +130,8 @@ def _web_search_schema(current: dict[str, Any], apis: dict[str, str]) -> vol.Sch
     """Off, a SearXNG address, or one of Home Assistant's LLM APIs.
 
     The API list is left out when there is none to pick, which is the case
-    until an integration such as Model Context Protocol registers one.
+    until an integration such as Model Context Protocol registers one; the
+    option says so, since the form cannot change once shown.
     """
     fields: dict[vol.Marker, Any] = {
         vol.Required(
@@ -141,14 +143,21 @@ def _web_search_schema(current: dict[str, Any], apis: dict[str, str]) -> vol.Sch
                     SelectOptionDict(value=WEB_SEARCH_SEARXNG, label="SearXNG"),
                     SelectOptionDict(
                         value=WEB_SEARCH_LLM_API,
-                        label="A Home Assistant LLM API (MCP server, ...)",
+                        label=(
+                            "A Home Assistant LLM API (MCP server, ...)"
+                            if apis
+                            else "A Home Assistant LLM API (none set up yet)"
+                        ),
                     ),
                 ]
             )
         ),
         vol.Optional(
             CONF_WEB_SEARCH_URL,
-            description={"suggested_value": current.get(CONF_WEB_SEARCH_URL)},
+            description={
+                "suggested_value": current.get(CONF_WEB_SEARCH_URL)
+                or DEFAULT_SEARXNG_URL
+            },
         ): TextSelector(),
     }
     if apis:
@@ -502,7 +511,7 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
             if (
                 not errors
                 and models is not None
-                and not any(same_model(model, m) for m in models)
+                and not offers_model(backend, model, models)
             ):
                 errors[CONF_LLM_MODEL] = "llm_model_not_found"
             if not errors:
@@ -583,7 +592,16 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
                 _web_search_schema(self._data, apis), user_input or {}
             ),
             errors=errors,
-            description_placeholders={"searxng_example": "http://192.168.1.20:8888"},
+            description_placeholders={
+                "searxng_example": DEFAULT_SEARXNG_URL,
+                "apis_note": (
+                    "Available: " + ", ".join(sorted(apis.values())) + "."
+                    if apis
+                    else "None is set up yet: add the Model Context Protocol "
+                    "integration, or another that provides an LLM API, then "
+                    "come back here."
+                ),
+            },
         )
 
     async def _async_save(self) -> ConfigFlowResult:
