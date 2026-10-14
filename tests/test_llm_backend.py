@@ -18,6 +18,7 @@ from custom_components.typesafe_conversation.llm_backend import (
     LLMBackendError,
     OllamaBackend,
     OpenAICompatBackend,
+    spoken,
 )
 from custom_components.typesafe_conversation.tools import AnswerTool
 
@@ -702,3 +703,105 @@ async def test_without_tools_the_request_is_unchanged(session, mocker):
     payload = mocker.mock_calls[0][2]
     assert "tools" not in payload
     assert ANSWER_LOOKUP_RULE not in payload["messages"][0]["content"]
+
+
+# --- what is said aloud -----------------------------------------------------
+
+BTC = "https://www.coingecko.com/en/coins/bitcoin"
+WIKI = "https://en.wikipedia.org/wiki/Lima"
+DOCS = "https://docs.example.org/setup/"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("It won. [formula1.com](https://www.formula1.com/x)", "It won."),
+        (f"Lima. [wikipedia.org]({WIKI})", "Lima."),
+        (
+            f"Lima. [britannica.com]({WIKI}) [wikipedia.org]({WIKI})",
+            f"Lima. britannica.com ({WIKI}) wikipedia.org",
+        ),
+        (
+            "MLS starts at 7:30 ([livesoccertv.com](https://livesoccertv.com/a)).",
+            "MLS starts at 7:30.",
+        ),
+        (
+            f"About $81,800, according to [coingecko.com]({BTC}).",
+            "About $81,800, according to coingecko.com.",
+        ),
+        (
+            f"See the [setup guide]({DOCS}) first.",
+            f"See the setup guide ({DOCS}) first.",
+        ),
+        (f"It is at [{DOCS}]({DOCS}).", f"It is at {DOCS}."),
+        ("Lima is the capital of Peru.", "Lima is the capital of Peru."),
+    ],
+)
+def test_links_are_made_speakable_and_credits_dropped(raw, expected):
+    assert spoken(raw) == expected
+
+
+def test_a_link_the_user_asked_for_keeps_its_address():
+    raw = f"The guide is at [docs.example.org]({DOCS})."
+
+    assert spoken(raw) == "The guide is at docs.example.org."
+    assert spoken(raw, keep_links=True) == f"The guide is at docs.example.org ({DOCS})."
+
+
+@pytest.mark.parametrize(
+    ("utterance", "expected"),
+    [
+        ("what is bitcoin at?", "About $81,800."),
+        (
+            "give me a link for the bitcoin price",
+            f"About $81,800. coingecko.com ({BTC})",
+        ),
+    ],
+)
+async def test_the_answer_is_cleaned_unless_a_link_was_asked_for(
+    session, mocker, utterance, expected
+):
+    backend = OpenAICompatBackend(session, "https://x.invalid", "m:online")
+    mocker.post(
+        "https://x.invalid/v1/chat/completions",
+        json=_openai(f"About $81,800. [coingecko.com]({BTC})"),
+    )
+
+    answer = await backend.answer_freeform(
+        utterance,
+        [],
+        home_state="",
+        local_time="10:00",
+        weekday="Monday",
+        speaker_area=None,
+    )
+
+    assert answer == expected
+
+
+@pytest.mark.parametrize(
+    ("backend_cls", "url", "body"),
+    [
+        (
+            OpenAICompatBackend,
+            "http://srv/v1/chat/completions",
+            {"choices": [{"message": {"content": None}, "finish_reason": "length"}]},
+        ),
+        (
+            OllamaBackend,
+            "http://srv/api/chat",
+            {"message": {"content": ""}, "done_reason": "length"},
+        ),
+    ],
+)
+async def test_an_answer_lost_to_the_token_limit_is_logged(
+    session, mocker, caplog, backend_cls, url, body
+):
+    """A reasoning model can spend the whole limit thinking and say nothing."""
+    backend = backend_cls(session, "http://srv", "m")
+    mocker.post(url, json=body)
+
+    answer = await _ask(backend, None)
+
+    assert answer == ""
+    assert "m answer stopped at its token limit before replying" in caplog.text

@@ -80,6 +80,7 @@ You are the voice assistant for a Home Assistant smart home.
 
 - Reply in plain spoken text. No markdown, no bullet lists, no emoji, no \
 headings.
+- Do not cite sources or add links, unless the user asks for a link.
 - Reply in the language the user spoke in.
 - Be brief: one or two sentences, under 40 words, as if speaking aloud.
 - You cannot control any device in this mode. Never claim to have turned \
@@ -130,12 +131,20 @@ ANSWER_LOOKUP_RULE = """
 current, live or that you are unsure of, such as news, schedules, scores, prices, \
 weather or opening hours; answer stable general knowledge directly. Never say you \
 cannot check or do not know something without looking it up first. If a lookup \
-fails, say you could not check. Never read out web addresses or list your \
-sources."""
+fails, say you could not check."""
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 _ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 _OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+_LINK = r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)"
+_LINK_RE = re.compile(_LINK)
+# A citation in brackets, or one or more trailing a finished sentence.
+_CITED_GROUP_RE = re.compile(rf"\s*\((?:\s*{_LINK}[\s,;]*)+\)")
+_CITED_TAIL_RE = re.compile(rf"(?<=[.!?])(?:\s*{_LINK})+(?=\s|$)")
+_ASKS_FOR_LINK_RE = re.compile(
+    r"\b(?:links?|urls?|website|web ?site|web address|webpage)\b", re.IGNORECASE
+)
 
 
 class LLMBackendError(Exception):
@@ -315,15 +324,16 @@ class LLMBackend(ABC):
         messages.append({"role": "user", "content": utterance})
 
         if tools:
-            return (await self._answer_with_tools(messages, tools)).strip()
-        text, metrics = await self._chat(
-            messages,
-            max_tokens=ANSWER_MAX_TOKENS,
-            temperature=ANSWER_TEMPERATURE,
-            timeout=self._answer_timeout,
-        )
-        _log_exchange("answer", self.name, self._model, messages, text, metrics)
-        return text.strip()
+            text = await self._answer_with_tools(messages, tools)
+        else:
+            text, metrics = await self._chat(
+                messages,
+                max_tokens=ANSWER_MAX_TOKENS,
+                temperature=ANSWER_TEMPERATURE,
+                timeout=self._answer_timeout,
+            )
+            _log_exchange("answer", self.name, self._model, messages, text, metrics)
+        return spoken(text, keep_links=bool(_ASKS_FOR_LINK_RE.search(utterance)))
 
     async def _answer_with_tools(
         self, messages: list[dict[str, Any]], tools: list[AnswerTool]
@@ -714,6 +724,7 @@ async def _run(by_name: dict[str, AnswerTool], call: ToolCall) -> str:
 #   load_s             Ollama only - a cold model load
 #   prompt_s, eval_s   Ollama only - enables tokens/sec
 #   total_s            Ollama only - the server's own view of the request
+#   cut_off            present (True) when the reply stopped at max_tokens
 
 
 def _ns_to_s(value: Any) -> float | None:
@@ -725,6 +736,8 @@ def _ns_to_s(value: Any) -> float | None:
 
 def _ollama_metrics(data: dict[str, Any], elapsed: float) -> dict[str, Any]:
     out: dict[str, Any] = {"elapsed_s": elapsed}
+    if data.get("done_reason") == "length":
+        out["cut_off"] = True
     for key, name in (
         ("prompt_eval_count", "prompt_tokens"),
         ("eval_count", "completion_tokens"),
@@ -749,6 +762,8 @@ def _openai_metrics(data: dict[str, Any], elapsed: float) -> dict[str, Any]:
     either; elapsed_s is the only timing available and it is ours.
     """
     out: dict[str, Any] = {"elapsed_s": elapsed}
+    if data["choices"][0].get("finish_reason") == "length":
+        out["cut_off"] = True
     usage = data.get("usage")
     if isinstance(usage, dict):
         for key, name in (
@@ -768,13 +783,20 @@ def _log_exchange(
     reply: str,
     metrics: dict[str, Any],
 ) -> None:
-    """Record one LLM exchange at DEBUG.
+    """Record one LLM exchange at DEBUG, and warn when it hit max_tokens.
 
     The system prompt embeds the home catalog - entity names, areas and
     current states - and home-assistant.log is what people paste into issue
-    reports, so it is truncated here. The reply is short enough
-    (ANSWER_MAX_TOKENS is 180) to log whole.
+    reports, so it is truncated here. The reply is short enough to log whole.
     """
+    if metrics.get("cut_off"):
+        LOGGER.warning(
+            "%s %s stopped at its token limit %s; a reasoning model may have "
+            "spent the limit thinking",
+            model,
+            operation,
+            "with an unfinished reply" if reply.strip() else "before replying",
+        )
     if not LOGGER.isEnabledFor(logging.DEBUG):
         return
 
@@ -850,6 +872,48 @@ async def _post_json(
         ) from err
     except json.JSONDecodeError as err:
         raise LLMBackendError(f"Response was not JSON: {err}") from err
+
+
+def _host(url: str) -> str:
+    host = url.split("//", 1)[-1].split("/", 1)[0].lower()
+    return host.removeprefix("www.")
+
+
+def _is_citation(label: str, url: str) -> bool:
+    """A source credit: the link's text is just the site it points to."""
+    site, host = label.strip().lower().removeprefix("www."), _host(url)
+    return "." in site and (host == site or host.endswith(f".{site}"))
+
+
+def _all_citations(text: str) -> bool:
+    return all(_is_citation(label, url) for label, url in _LINK_RE.findall(text))
+
+
+def spoken(text: str, *, keep_links: bool = False) -> str:
+    """The answer as it should be said: no markdown links, no source credits.
+
+    Some providers add their own web search and tell the model to cite it as
+    markdown links, which would be read aloud. Credits standing apart from the
+    sentence (in brackets, or after it ends) are dropped; one inside a sentence
+    becomes the site's name. Any other link keeps its address, as does every
+    link when the user asked for one.
+    """
+    if not keep_links:
+        for pattern in (_CITED_GROUP_RE, _CITED_TAIL_RE):
+            text = pattern.sub(
+                lambda m: "" if _all_citations(m.group(0)) else m.group(0), text
+            )
+
+    def plain(match: re.Match[str]) -> str:
+        label, url = match.group(1).strip(), match.group(2)
+        if label == url:
+            return url
+        if _is_citation(label, url) and not keep_links:
+            return label
+        return f"{label} ({url})"
+
+    text = _LINK_RE.sub(plain, text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
 def _parse_object(raw: str) -> dict[str, Any]:

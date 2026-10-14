@@ -124,7 +124,11 @@ call after a restart. Raise it with CONF_LLM_TIMEOUT, or point the LLM at a
 smaller model - this path is only used for prose, so it does not need to be
 the same model you would pick for reasoning."""
 SPLIT_MAX_TOKENS: Final = 200
-ANSWER_MAX_TOKENS: Final = 180
+ANSWER_MAX_TOKENS: Final = 1024
+"""A ceiling, not the answer's length; the prompt keeps answers short.
+
+A reasoning model spends part of this on thinking before it says anything, so
+a tight ceiling cuts the answer off or leaves it empty."""
 CHECK_MAX_TOKENS: Final = 16
 """The test request at setup only needs the server to accept the model."""
 FILL_MAX_TOKENS: Final = 300
