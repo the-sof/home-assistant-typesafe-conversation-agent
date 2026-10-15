@@ -541,7 +541,11 @@ def _plan_command(  # noqa: C901 - one decision tree, kept in one place on purpo
                 target_entity,
                 entities_by_id,
                 trace,
-                reason="scope=single but no confident entity",
+                reason=(
+                    "whole_house cannot fan out, no confident entity"
+                    if whole_house
+                    else "scope=single but no confident entity"
+                ),
             )
     elif (
         _solid(target_area, T_AREA)

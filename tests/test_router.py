@@ -608,6 +608,7 @@ def test_a_whole_house_device_is_not_taken_from_the_speakers_room(
 
     assert plan.route is not Route.COMMAND
     assert plan.target.area_id != "office"
+    assert plan.reason.startswith("whole_house cannot fan out")
 
 
 def test_every_light_still_means_the_whole_house(entities_by_id, available_domains):
