@@ -178,6 +178,11 @@ def _fans_out(domain: str, target_entity: ChoiceAnswer | None) -> bool:
     """
     if domain in _ONLY_ACTION:
         return False
+    return _names_no_device(target_entity)
+
+
+def _names_no_device(target_entity: ChoiceAnswer | None) -> bool:
+    """Whether the model leans to no one device, as "everything" does."""
     return target_entity is None or target_entity.choice == Q.NO_SINGLE_ENTITY
 
 
@@ -416,10 +421,13 @@ def _plan_command(  # noqa: C901 - one decision tree, kept in one place on purpo
         # no domain would raise IntentHandleError ("cannot target all
         # devices"), so the executor fans out over the controllable domains
         # instead of guessing one.
+        # Not when it leans to one device it could not pin down: that is one
+        # thing, not everything.
         if (
             scope is not None
             and scope.choice == "whole_house"
             and _solid(scope, T_SCOPE_WHOLE_HOUSE)
+            and _names_no_device(target_entity)
         ):
             return Plan(
                 Route.COMMAND,
@@ -513,11 +521,17 @@ def _plan_command(  # noqa: C901 - one decision tree, kept in one place on purpo
         # which. Widening to the whole area would act on devices they did not
         # mention, so ask instead - unless the room the request was spoken in
         # holds exactly one of these, in which case there is nothing to widen.
+        # A device that serves the whole house need not be in that room, so
+        # a whole-house scope always asks.
         if (
-            here_area := _lone_candidate_area(
-                speaker_area_id, domain, entities_by_id, unavailable_ids
+            not whole_house
+            and (
+                here_area := _lone_candidate_area(
+                    speaker_area_id, domain, entities_by_id, unavailable_ids
+                )
             )
-        ) is not None:
+            is not None
+        ):
             trace["speaker_area_default"] = here_area
             chosen_area = here_area
         else:

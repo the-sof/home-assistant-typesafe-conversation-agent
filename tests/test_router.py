@@ -137,23 +137,27 @@ def test_unlocking_asks_before_acting(entities_by_id, available_domains):
     assert plan.trace["risky"] > 0.9
 
 
-def test_ambiguous_target_asks_which_one(entities_by_id, available_domains):
+@MODELS
+def test_ambiguous_target_asks_which_one(answers, entities_by_id, available_domains):
     plan, _ = _route(
-        "turn_on_the_thing_in_the_corner", entities_by_id, available_domains
+        "turn_on_the_thing_in_the_corner", entities_by_id, available_domains, answers
     )
     assert plan.route in (Route.CLARIFY, Route.FALLBACK)
     if plan.route is Route.CLARIFY:
         assert len(plan.options) == 2
 
 
-def test_whole_house_command_never_lacks_a_target(entities_by_id, available_domains):
+@MODELS
+def test_whole_house_command_never_lacks_a_target(
+    answers, entities_by_id, available_domains
+):
     """'turn off everything' names no domain.
 
     An intent with no name/area/floor/domain constraint raises
     IntentHandleError, so the plan must say whole_house and let the executor
     fan out over the domains that exist.
     """
-    plan, _ = _route("turn_off_everything", entities_by_id, available_domains)
+    plan, _ = _route("turn_off_everything", entities_by_id, available_domains, answers)
     if plan.route is Route.COMMAND:
         assert plan.target.whole_house is True
         assert plan.action == "turn_off"
@@ -560,6 +564,50 @@ def test_scripts_never_fan_out_to_the_whole_house(entities_by_id, available_doma
 
     assert plan.route is not Route.COMMAND
     assert plan.target.whole_house is False
+
+
+def test_a_device_it_cannot_pin_down_is_not_everything(
+    entities_by_id, available_domains
+):
+    """With no domain either, leaning to one switch must not turn off the house."""
+    plan = _plan(
+        entities_by_id,
+        available_domains,
+        spoken_from="kitchen",
+        scope=WHOLE_HOUSE,
+        target_domain=_choice("switch", {"switch": 0.5, "none": 0.5}, 0.3),
+        target_entity=_choice(
+            "switch.dishwasher",
+            {"switch.dishwasher": 0.5, "no_single_entity": 0.45},
+            0.45,
+        ),
+        action_switch=_choice("turn_off", {"turn_off": 0.89, "toggle": 0.06}, 0.85),
+    )
+
+    assert plan.route is not Route.COMMAND
+    assert plan.target.whole_house is False
+
+
+def test_a_whole_house_device_is_not_taken_from_the_speakers_room(
+    entities_by_id, available_domains
+):
+    """The office's only lock is not the house lock that was half-named."""
+    plan = _plan(
+        entities_by_id,
+        available_domains,
+        spoken_from="office",
+        scope=WHOLE_HOUSE,
+        target_domain=_choice("lock", {"lock": 0.97, "none": 0.03}, 0.96),
+        target_entity=_choice(
+            "lock.front_door",
+            {"lock.front_door": 0.5, "no_single_entity": 0.45},
+            0.45,
+        ),
+        action_lock=_choice("lock", {"lock": 0.95, "unlock": 0.05}, 0.92),
+    )
+
+    assert plan.route is not Route.COMMAND
+    assert plan.target.area_id != "office"
 
 
 def test_every_light_still_means_the_whole_house(entities_by_id, available_domains):
