@@ -38,6 +38,7 @@ from .executor import (
     async_execute_cancel,
     async_execute_query,
     describe_action,
+    describe_query,
 )
 from .extraction import extract
 from .llm_backend import LLMBackend, LLMBackendError
@@ -407,10 +408,13 @@ class TypeSafeAgent:
                 if plan.query_kind == "needs_prose":
                     return await self._answer_freeform(user_input, chat_log)
                 try:
-                    return await async_execute_query(self.hass, plan, user_input)
+                    result = await async_execute_query(self.hass, plan, user_input)
                 except (ExecutionError, intent.IntentError) as err:
                     LOGGER.debug("Query execution failed (%s)", err)
                     return await self._answer_freeform(user_input, chat_log)
+                if _spoken(result):
+                    return result
+                return await self._put_into_words(plan, result, user_input, chat_log)
 
             case Route.CLARIFY:
                 names = " or ".join(name for _, name in plan.options)
@@ -611,9 +615,11 @@ class TypeSafeAgent:
                         f"{part} ({_join(refused)} did not respond, "
                         "though the rest of that may have changed)"
                     )
-                elif plan.route is Route.QUERY and (answer := _spoken(result)):
+                elif plan.route is Route.QUERY:
                     # The answer is the point of a question; keep what it said.
-                    answers.append(answer)
+                    answers.append(
+                        _spoken(result) or await describe_query(self.hass, plan, result)
+                    )
                 else:
                     done.append(plan.target.described)
             if failed:
@@ -713,6 +719,25 @@ class TypeSafeAgent:
             intent.IntentResponseErrorCode.NO_INTENT_MATCH,
             "Sorry, I'm not sure what you'd like me to do.",
         )
+
+    async def _put_into_words(
+        self,
+        plan: Plan,
+        result: intent.IntentResponse,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+    ) -> intent.IntentResponse:
+        """Speech for an answer the state handlers left without any.
+
+        The LLM phrases it best, from the same home state; without one, or if
+        it fails, a plain sentence built from what the handler found.
+        """
+        if self.llm is not None:
+            answer = await self._answer_freeform(user_input, chat_log)
+            if answer.response_type is not intent.IntentResponseType.ERROR:
+                return answer
+        result.async_set_speech(await describe_query(self.hass, plan, result))
+        return result
 
     async def _answer_freeform(
         self,
