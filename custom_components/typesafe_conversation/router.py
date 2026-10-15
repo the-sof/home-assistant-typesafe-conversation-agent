@@ -169,6 +169,18 @@ _ONLY_ACTION: dict[str, str] = {"script": "run", "scene": "activate", "button": 
 """Domains with a single possible action, which a solid target implies."""
 
 
+def _fans_out(domain: str, target_entity: ChoiceAnswer | None) -> bool:
+    """Whether a whole-house scope may act on every device of the domain.
+
+    Not when the model leans to one device without settling on it: that is a
+    single thing it could not pin down, not all of them. And never for a
+    script, scene or button - "run every script" is never what was asked.
+    """
+    if domain in _ONLY_ACTION:
+        return False
+    return target_entity is None or target_entity.choice == Q.NO_SINGLE_ENTITY
+
+
 def route(
     response: SystemOneResponse,
     *,
@@ -280,10 +292,12 @@ def _plan_query(
     speaker_area_id: str | None,
     trace: dict[str, Any],
 ) -> Plan:
+    scope = response.choice(Q.Q_SCOPE)
     target_entity = response.choice(Q.Q_TARGET_ENTITY)
     target_area = response.choice(Q.Q_TARGET_AREA)
     target_domain = response.choice(Q.Q_TARGET_DOMAIN)
     trace.update(
+        scope=_describe(scope),
         target_entity=_describe(target_entity),
         target_area=_describe(target_area),
         target_domain=_describe(target_domain),
@@ -297,6 +311,14 @@ def _plan_query(
     ):
         target.entity = entities_by_id.get(target_entity.choice)
     if (
+        scope is not None
+        and scope.choice == "whole_house"
+        and _solid(scope, T_SCOPE_WHOLE_HOUSE)
+    ):
+        # "How many lights are on?" asks about the house. The room it was
+        # spoken in can still score as the area; it must not narrow the answer.
+        pass
+    elif (
         _solid(target_area, T_AREA)
         and target_area is not None
         and target_area.choice != Q.NO_AREA
@@ -459,11 +481,17 @@ def _plan_command(  # noqa: C901 - one decision tree, kept in one place on purpo
     target = Target(domain=domain)
     chosen_area: str | None = None
     preferred_area: str | None = None
-    if (
+    solid_entity = entity is not None and _solid(target_entity, T_ENTITY)
+    whole_house = (
         scope is not None
         and scope.choice == "whole_house"
         and _solid(scope, T_SCOPE_WHOLE_HOUSE)
-    ):
+    )
+    # A device that serves the whole house, such as the alarm or the water
+    # main, scores a whole-house scope too. A solid device therefore wins over
+    # the scope: turning off every switch because one of them is the water
+    # main is never meant.
+    if whole_house and not solid_entity and _fans_out(domain, target_entity):
         target.whole_house = True
     elif (
         scope is not None
@@ -472,10 +500,15 @@ def _plan_command(  # noqa: C901 - one decision tree, kept in one place on purpo
         and (floor := _resolve_floor(entity, target_area, catalog_floors)) is not None
     ):
         target.floor_name = floor
-    elif entity is not None and _solid(target_entity, T_ENTITY):
+    elif solid_entity:
         target.entity = entity
         target.area_id = entity.area_id
-    elif scope is not None and scope.choice == "single" and _solid(scope, T_SCOPE):
+    elif whole_house or (
+        scope is not None and scope.choice == "single" and _solid(scope, T_SCOPE)
+    ):
+        # A whole-house scope that cannot fan out (see _fans_out) is treated
+        # as scope=single: one particular thing was meant.
+        #
         # The user asked for one specific thing and we could not work out
         # which. Widening to the whole area would act on devices they did not
         # mention, so ask instead - unless the room the request was spoken in
