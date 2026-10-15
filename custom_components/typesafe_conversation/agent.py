@@ -31,7 +31,7 @@ from .const import (
     MAX_HISTORY_TURNS,
     PENDING_FILL_SECONDS,
 )
-from .entities import EntityCatalog
+from .entities import EntityCatalog, _pick_attributes
 from .executor import (
     ExecutionError,
     async_execute,
@@ -729,21 +729,33 @@ class TypeSafeAgent:
     ) -> intent.IntentResponse:
         """Speech for an answer the state handlers left without any.
 
-        The LLM phrases it best, from the same home state; without one, or if
-        it fails, a plain sentence built from what the handler found.
+        The LLM phrases it best, given what the handler found: the home state
+        summary alone holds no attributes and stops at a cap, so it may not
+        have the answer. Without an LLM, or if it fails, the plain sentence.
         """
+        described = await describe_query(self.hass, plan, result)
         if self.llm is not None:
-            answer = await self._answer_freeform(user_input, chat_log)
+            found = [described]
+            found += [
+                f"{state.name}: {state.state} {attributes}"
+                for state in [*result.matched_states, *result.unmatched_states]
+                if (attributes := _pick_attributes(state.domain, state))
+            ]
+            answer = await self._answer_freeform(
+                user_input, chat_log, found="\n".join(found)
+            )
             if answer.response_type is not intent.IntentResponseType.ERROR:
                 return answer
-        result.async_set_speech(await describe_query(self.hass, plan, result))
+        result.async_set_speech(described)
         return result
 
     async def _answer_freeform(
         self,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
+        found: str | None = None,
     ) -> intent.IntentResponse:
+        """Answer in prose. ``found`` is what the home reported for this question."""
         if self.llm is None:
             return self._error(
                 user_input,
@@ -752,6 +764,9 @@ class TypeSafeAgent:
             )
         now = dt_util.now()
         entities = self.catalog.entities[:CATALOG_SUMMARY_MAX_ENTITIES]
+        home_state = self.catalog.summarize(entities)
+        if found:
+            home_state = f"Found for this question:\n{found}\n\n{home_state}"
         tools = await async_answer_tools(
             self.hass, self.settings.web_search or {}, user_input
         )
@@ -759,7 +774,7 @@ class TypeSafeAgent:
             answer = await self.llm.answer_freeform(
                 user_input.text,
                 self._history_pairs(chat_log),
-                home_state=self.catalog.summarize(entities),
+                home_state=home_state,
                 local_time=now.strftime("%H:%M"),
                 weekday=now.strftime("%A"),
                 speaker_area=self._speaker_area_name(user_input),

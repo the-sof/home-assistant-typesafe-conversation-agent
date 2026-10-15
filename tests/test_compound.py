@@ -254,6 +254,8 @@ async def test_a_question_without_words_is_phrased_by_the_llm(hass: HomeAssistan
     response = await _ask_one(agent)
 
     assert _speech(response) == "Yes, it's raining."
+    found = agent._answer_freeform.await_args.kwargs["found"]
+    assert "Forecast Home is rainy." in found, "the LLM is told what was found"
 
 
 async def test_a_failed_llm_still_leaves_an_answer(hass: HomeAssistant):
