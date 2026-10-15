@@ -766,7 +766,9 @@ class TypeSafeAgent:
         entities = self.catalog.entities[:CATALOG_SUMMARY_MAX_ENTITIES]
         home_state = self.catalog.summarize(entities)
         if found:
-            home_state = f"Found for this question:\n{found}\n\n{home_state}"
+            # After the summary, not before: the unchanged prefix keeps the
+            # server's prompt cache warm.
+            home_state = f"{home_state}\n\nFound for this question:\n{found}"
         tools = await async_answer_tools(
             self.hass, self.settings.web_search or {}, user_input
         )
