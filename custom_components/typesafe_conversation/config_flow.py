@@ -49,24 +49,33 @@ from .const import (
     CONF_LLM_TIMEOUT,
     CONF_MODEL,
     CONF_SERVER_PROFILE,
+    CONF_WEB_SEARCH,
+    CONF_WEB_SEARCH_API,
+    CONF_WEB_SEARCH_URL,
     CONVERSATION_DOMAIN,
     DEFAULT_ALWAYS_CONFIRM_RISKY,
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
     DEFAULT_OLLAMA_URL,
     DEFAULT_OPENAI_COMPAT_URL,
+    DEFAULT_SEARXNG_URL,
     DOMAIN,
     LOGGER,
     MEASURE_UTTERANCE,
     TYPESAFE_CONSOLE_URL,
+    WEB_SEARCH_KEYS,
+    WEB_SEARCH_LLM_API,
+    WEB_SEARCH_OFF,
+    WEB_SEARCH_SEARXNG,
 )
 from .entities import EntityCatalog
 from .llm_backend import (
     LLMAuthError,
     LLMBackendError,
     async_list_models,
+    create_backend,
     normalise_llm_url,
-    same_model,
+    offers_model,
 )
 from .system_one import (
     ServerProfile,
@@ -78,6 +87,12 @@ from .system_one import (
     normalise_base_url,
     normalise_model,
     valid_url,
+)
+from .tools import (
+    SearchError,
+    async_searxng_search,
+    lookup_apis,
+    normalise_searxng_url,
 )
 
 _PASSWORD = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
@@ -110,6 +125,57 @@ _LLM_KEYS = (
     CONF_LLM_TIMEOUT,
     CONF_LLM_KEEP_LOADED,
 )
+
+
+def _web_search_schema(current: dict[str, Any], apis: dict[str, str]) -> vol.Schema:
+    """Off, a SearXNG address, or one of Home Assistant's LLM APIs.
+
+    The API list is left out when there is none to pick, which is the case
+    until an integration such as Model Context Protocol registers one; the
+    option says so, since the form cannot change once shown.
+    """
+    fields: dict[vol.Marker, Any] = {
+        vol.Required(
+            CONF_WEB_SEARCH, default=current.get(CONF_WEB_SEARCH, WEB_SEARCH_OFF)
+        ): SelectSelector(
+            SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=WEB_SEARCH_OFF, label="Off"),
+                    SelectOptionDict(value=WEB_SEARCH_SEARXNG, label="SearXNG"),
+                    SelectOptionDict(
+                        value=WEB_SEARCH_LLM_API,
+                        label=(
+                            "A Home Assistant LLM API (MCP server, ...)"
+                            if apis
+                            else "A Home Assistant LLM API (none set up yet)"
+                        ),
+                    ),
+                ]
+            )
+        ),
+        vol.Optional(
+            CONF_WEB_SEARCH_URL,
+            description={
+                "suggested_value": current.get(CONF_WEB_SEARCH_URL)
+                or DEFAULT_SEARXNG_URL
+            },
+        ): TextSelector(),
+    }
+    if apis:
+        fields[
+            vol.Optional(
+                CONF_WEB_SEARCH_API,
+                description={"suggested_value": current.get(CONF_WEB_SEARCH_API)},
+            )
+        ] = SelectSelector(
+            SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=api_id, label=name)
+                    for api_id, name in apis.items()
+                ]
+            )
+        )
+    return vol.Schema(fields)
 
 
 _LLM_DEFAULT_URL = {
@@ -405,7 +471,7 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             backend = user_input[CONF_LLM_BACKEND]
             if backend == BACKEND_NONE:
-                for key in _LLM_KEYS:
+                for key in (*_LLM_KEYS, *WEB_SEARCH_KEYS):
                     self._data.pop(key, None)
                 return await self._async_save()
             self._llm_backend = backend
@@ -421,6 +487,7 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
         backend = self._llm_backend
         errors: dict[str, str] = {}
         models: list[str] | None = None
+        reason = ""
         if user_input is not None:
             url = normalise_llm_url(backend, user_input[CONF_LLM_BASE_URL])
             key = user_input.get(CONF_LLM_API_KEY) or None
@@ -446,9 +513,24 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
             if (
                 not errors
                 and models is not None
-                and not any(same_model(model, m) for m in models)
+                and not offers_model(backend, model, models)
             ):
                 errors[CONF_LLM_MODEL] = "llm_model_not_found"
+            if not errors and backend == BACKEND_OPENAI_COMPAT:
+                # Ollama's list names exactly what is installed, and a test
+                # there would load the model, which can take minutes. A hosted
+                # server's list says nothing about variants or what the key
+                # may use, so ask the model once.
+                llm = create_backend(
+                    async_get_clientsession(self.hass),
+                    {**user_input, CONF_LLM_BACKEND: backend, CONF_LLM_BASE_URL: url},
+                )
+                try:
+                    if llm is not None:
+                        await llm.async_check_model()
+                except LLMBackendError as err:
+                    errors[CONF_LLM_MODEL] = "llm_model_rejected"
+                    reason = str(err)
             if not errors:
                 # Replace rather than merge, so clearing a field (or switching
                 # keep-loaded off) on reconfigure actually takes effect.
@@ -459,7 +541,7 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
                 self._data[CONF_LLM_BACKEND] = backend
                 self._data[CONF_LLM_BASE_URL] = url
-                return await self._async_save()
+                return await self.async_step_web_search()
         else:
             # Best effort: fill the model list from the default address, so the
             # common case is a pick rather than typing a name.
@@ -478,7 +560,65 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
                 _llm_settings_schema(backend, self._data, models), user_input or {}
             ),
             errors=errors,
-            description_placeholders=_LLM_EXAMPLES,
+            description_placeholders={**_LLM_EXAMPLES, "reason": reason},
+        )
+
+    async def async_step_web_search(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Whether the model may look things up when it answers, and where.
+
+        Off by default. A SearXNG address is checked with a real query, so a
+        missing JSON format - SearXNG's default - is caught here rather than on
+        the first question.
+        """
+        errors: dict[str, str] = {}
+        apis = lookup_apis(self.hass)
+        if user_input is not None:
+            source = user_input[CONF_WEB_SEARCH]
+            values: dict[str, Any] = {CONF_WEB_SEARCH: source}
+            if source == WEB_SEARCH_SEARXNG:
+                url = normalise_searxng_url(user_input.get(CONF_WEB_SEARCH_URL) or "")
+                values[CONF_WEB_SEARCH_URL] = url
+                if not valid_url(url):
+                    errors[CONF_WEB_SEARCH_URL] = "invalid_url"
+                else:
+                    try:
+                        await async_searxng_search(
+                            async_get_clientsession(self.hass), url, "Home Assistant"
+                        )
+                    except SearchError as err:
+                        errors[CONF_WEB_SEARCH_URL] = (
+                            "search_json_disabled"
+                            if str(err) == "json_disabled"
+                            else "search_cannot_connect"
+                        )
+            elif source == WEB_SEARCH_LLM_API:
+                api_id = user_input.get(CONF_WEB_SEARCH_API)
+                values[CONF_WEB_SEARCH_API] = api_id
+                if api_id not in apis:
+                    errors["base"] = "search_no_api" if not apis else "search_pick_api"
+            if not errors:
+                for key in WEB_SEARCH_KEYS:
+                    self._data.pop(key, None)
+                self._data.update(values)
+                return await self._async_save()
+        return self.async_show_form(
+            step_id="web_search",
+            data_schema=self.add_suggested_values_to_schema(
+                _web_search_schema(self._data, apis), user_input or {}
+            ),
+            errors=errors,
+            description_placeholders={
+                "searxng_example": DEFAULT_SEARXNG_URL,
+                "apis_note": (
+                    "Available: " + ", ".join(sorted(apis.values())) + "."
+                    if apis
+                    else "None is set up yet: add the Model Context Protocol "
+                    "integration, or another that provides an LLM API, then "
+                    "come back here."
+                ),
+            },
         )
 
     async def _async_save(self) -> ConfigFlowResult:

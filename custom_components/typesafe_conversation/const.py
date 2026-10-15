@@ -76,6 +76,20 @@ CONF_INLINE_ENTITY_DESCRIPTIONS: Final = "inline_entity_descriptions"
 CONF_ALWAYS_CONFIRM_RISKY: Final = "always_confirm_risky"
 CONF_LLM_TIMEOUT: Final = "llm_timeout"
 CONF_LLM_KEEP_LOADED: Final = "llm_keep_loaded"
+CONF_WEB_SEARCH: Final = "web_search"
+CONF_WEB_SEARCH_URL: Final = "web_search_url"
+CONF_WEB_SEARCH_API: Final = "web_search_api"
+
+WEB_SEARCH_KEYS: Final = (CONF_WEB_SEARCH, CONF_WEB_SEARCH_URL, CONF_WEB_SEARCH_API)
+
+DEFAULT_SEARXNG_URL: Final = "http://localhost:8888"
+"""Shown in the address field as an example; only saved if SearXNG is chosen."""
+
+WEB_SEARCH_OFF: Final = "off"
+WEB_SEARCH_SEARXNG: Final = "searxng"
+WEB_SEARCH_LLM_API: Final = "llm_api"
+"""Any LLM API registered in Home Assistant other than Assist - which is how an
+MCP server added through the Model Context Protocol integration shows up."""
 
 DEFAULT_ALWAYS_CONFIRM_RISKY: Final = True
 """Ask before unlocking or opening the house, however sure the model is.
@@ -110,7 +124,13 @@ call after a restart. Raise it with CONF_LLM_TIMEOUT, or point the LLM at a
 smaller model - this path is only used for prose, so it does not need to be
 the same model you would pick for reasoning."""
 SPLIT_MAX_TOKENS: Final = 200
-ANSWER_MAX_TOKENS: Final = 180
+ANSWER_MAX_TOKENS: Final = 1024
+"""A ceiling, not the answer's length; the prompt keeps answers short.
+
+A reasoning model spends part of this on thinking before it says anything, so
+a tight ceiling cuts the answer off or leaves it empty."""
+CHECK_MAX_TOKENS: Final = 16
+"""The test request at setup only needs the server to accept the model."""
 FILL_MAX_TOKENS: Final = 300
 """Room for a script's field values as JSON; they are short."""
 SCRIPT_REPLY_SECONDS: Final = 10.0
@@ -121,6 +141,15 @@ PENDING_FILL_SECONDS: Final = 90
 """How long the agent waits for the answer to "What time should I set it for?"."""
 ANSWER_TEMPERATURE: Final = 0.3
 MAX_SUB_COMMANDS: Final = 6
+
+MAX_TOOL_ROUNDS: Final = 2
+"""Rounds of tool calls before the model must answer with what it has."""
+TOOL_TIMEOUT: Final = 8.0
+"""Seconds one lookup may take. A voice answer cannot wait much longer."""
+TOOL_RESULT_MAX_CHARS: Final = 3000
+"""How much of a tool's result goes back to the model. Search results are long,
+and every character is prompt the model has to read before it can answer."""
+SEARCH_RESULTS: Final = 5
 
 PROMPT_LOG_CHARS: Final = 200
 """How much of a system prompt to write to the debug log.

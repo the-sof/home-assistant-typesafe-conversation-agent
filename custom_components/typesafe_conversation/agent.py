@@ -55,6 +55,7 @@ from .system_one import (
     SystemOneRequestError,
     SystemOneResponse,
 )
+from .tools import async_answer_tools
 
 
 def build_request(
@@ -121,6 +122,8 @@ class AgentSettings:
     inline_entity_descriptions: bool = False
     always_confirm_risky: bool = DEFAULT_ALWAYS_CONFIRM_RISKY
     bypass_local_intents: bool = False
+    web_search: dict[str, Any] | None = None
+    """The entry's web search settings; None or "off" offers the answer no tools."""
 
 
 class TypeSafeAgent:
@@ -724,6 +727,9 @@ class TypeSafeAgent:
             )
         now = dt_util.now()
         entities = self.catalog.entities[:CATALOG_SUMMARY_MAX_ENTITIES]
+        tools = await async_answer_tools(
+            self.hass, self.settings.web_search or {}, user_input
+        )
         try:
             answer = await self.llm.answer_freeform(
                 user_input.text,
@@ -732,6 +738,7 @@ class TypeSafeAgent:
                 local_time=now.strftime("%H:%M"),
                 weekday=now.strftime("%A"),
                 speaker_area=self._speaker_area_name(user_input),
+                tools=tools,
             )
         except LLMBackendError as err:
             LOGGER.warning("LLM could not answer: %s", err)

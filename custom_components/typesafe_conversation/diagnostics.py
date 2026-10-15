@@ -21,17 +21,19 @@ from .const import (
     CONF_BASE_URL,
     CONF_LLM_API_KEY,
     CONF_LLM_BASE_URL,
+    CONF_WEB_SEARCH_URL,
 )
 
-# Base URLs are redacted too - the System One server's and the LLM's: a
-# self-hosted one is usually a private hostname, and diagnostics get pasted into
-# public issue threads. Redaction matches keys at any depth, so this also covers
-# the URL recorded inside the cached server profile.
+# Base URLs are redacted too - the System One server's, the LLM's and the search
+# instance's: a self-hosted one is usually a private hostname, and diagnostics
+# get pasted into public issue threads. Redaction matches keys at any depth, so
+# this also covers the URL recorded inside the cached server profile.
 REDACT = {
     CONF_API_KEY,
     CONF_BASE_URL,
     CONF_LLM_API_KEY,
     CONF_LLM_BASE_URL,
+    CONF_WEB_SEARCH_URL,
     "api_key",
     "token",
 }
