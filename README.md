@@ -173,9 +173,10 @@ Three things are worth knowing before you rely on it:
 
   then `ollama create tev1-16k -f Modelfile`, and choose `tev1-16k`.
 - **Thresholds were fitted to Jev.** Every routing threshold in `const.py` comes
-  from `jev-1.13.0`'s answers. Another model's probabilities are shaped
-  differently, so it may ask "did you mean…?" too often or act too readily until
-  they are re-fitted with `scripts/calibrate.py --base-url`.
+  from `jev-1.13.0`'s answers, and the routing tests replay `jev-1.14.0` too.
+  Another model's probabilities are shaped differently, so it may ask "did you
+  mean…?" too often or act too readily until they are re-fitted with
+  `scripts/calibrate.py --base-url`.
 
 Local servers also accept fewer options per question - Ollama allows 26 - so a
 home with more exposed entities than that picks its device in two requests: the
@@ -471,14 +472,18 @@ CI runs the suite against both ends of the supported range on every push and
 pull request, deriving those requirements the same way.
 
 The routing tests replay **real recorded Jev responses** from
-`tests/fixtures/answers/`, so they describe how the model actually behaves
-rather than how we imagine it does. To re-record them, or to re-fit the
-thresholds in `const.py` against your own home:
+`tests/fixtures/answers/` (`jev-1.13.0`) and `tests/fixtures/answers_1_14/`
+(`jev-1.14.0`), so they describe how the model actually behaves rather than how
+we imagine it does. To re-record them, or to re-fit the thresholds in
+`const.py` against your own home:
 
 ```sh
 set -a; . ./.env; set +a
 .venv/bin/python scripts/calibrate.py --csv out.csv --record tests/fixtures/answers
 ```
+
+A cases file for `--cases` holds `[utterance, expected]` pairs, or
+`[utterance, expected, language]` to send a request in another language.
 
 Every threshold is a named constant in `const.py` precisely so it can be
 re-fitted rather than argued about.
