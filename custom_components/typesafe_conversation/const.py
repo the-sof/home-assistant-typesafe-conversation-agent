@@ -165,6 +165,12 @@ Those entries all point at TypeSafe, which accepts 255. Newer entries use the
 cap discovered for their own server instead."""
 MAX_HISTORY_TURNS: Final = 2
 CATALOG_SUMMARY_MAX_ENTITIES: Final = 120
+FORECAST_MAX_ENTITIES: Final = 2
+"""Weather entities whose forecast goes into an LLM answer's home state."""
+FORECAST_HOURS: Final = 12
+"""Hourly entries kept when an entity offers no daily forecast."""
+FORECAST_TIMEOUT: Final = 2.0
+"""Seconds to wait for a forecast before answering without it."""
 TRACE_HISTORY: Final = 20
 """How many recent request traces to keep for the diagnostics download."""
 

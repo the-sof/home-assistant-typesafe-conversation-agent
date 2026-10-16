@@ -259,6 +259,9 @@ and `always_confirm_risky`, `bypass_local_intents` and
 
 ### Web search
 
+Weather needs none of this: an answer is given the coming days' forecast of
+any weather entity exposed to Assist, along with today's date.
+
 Without it, a question about anything current — tonight's game, the news, a
 shop's hours — gets a guess or "I don't know". Turn it on in the **Web search**
 step under **Reconfigure**, after the language model, and pick where lookups

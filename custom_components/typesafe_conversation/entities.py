@@ -13,6 +13,7 @@ rebuilt lazily when a registry or exposure event marks it dirty. Current
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -26,6 +27,7 @@ from homeassistant.components.homeassistant.exposed_entities import (
 )
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, State, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import (
     area_registry as ar,
 )
@@ -41,9 +43,10 @@ from homeassistant.helpers import (
 from homeassistant.helpers import (
     intent,
 )
+from homeassistant.helpers.translation import async_get_translations
 from homeassistant.util import dt as dt_util
 
-from .const import LOGGER
+from .const import FORECAST_HOURS, FORECAST_MAX_ENTITIES, FORECAST_TIMEOUT, LOGGER
 
 # Attributes worth sending, per domain. Home Assistant's own helper uses one
 # flat set for every domain; most of those values are noise outside the domain
@@ -415,6 +418,105 @@ def _pick_attributes(domain: str, state: State) -> dict[str, Any]:
             value = str(value)
         picked[name] = value
     return picked
+
+
+async def async_state_translations(
+    hass: HomeAssistant, domains: Iterable[str]
+) -> dict[str, str]:
+    """Home Assistant's own names for these domains' states, in English.
+
+    English to match the sentences they are spoken in, which are English too.
+    """
+    return await async_get_translations(hass, "en", "entity_component", set(domains))
+
+
+def state_word(
+    translations: dict[str, str], domain: str, device_class: str | None, value: str
+) -> str:
+    """A state as a person would say it: ``partlycloudy`` -> "partly cloudy"."""
+    prefix = f"component.{domain}.entity_component"
+    word = translations.get(
+        f"{prefix}.{device_class or '_'}.state.{value}"
+    ) or translations.get(f"{prefix}._.state.{value}")
+    return (word or value.replace("_", " ")).lower()
+
+
+async def async_forecast_summary(
+    hass: HomeAssistant, entities: Iterable[CatalogEntity]
+) -> str:
+    """The coming days' forecast of the exposed weather entities, one line each.
+
+    A weather entity's state is only the current condition, so without this
+    "will it rain this weekend?" has no answer in the home state. A forecast
+    that cannot be had is left out: it must never cost the answer itself.
+    """
+    weather = [e for e in entities if e.domain == "weather"][:FORECAST_MAX_ENTITIES]
+    if not weather:
+        return ""
+    translations = await async_state_translations(hass, ["weather"])
+    lines: list[str] = []
+    for entity in weather:
+        if (state := hass.states.get(entity.entity_id)) is None:
+            continue
+        features = state.attributes.get("supported_features") or 0
+        kind = next((name for flag, name in _FORECAST_KINDS if features & flag), None)
+        if kind is None:
+            continue
+        try:
+            async with asyncio.timeout(FORECAST_TIMEOUT):
+                response = await hass.services.async_call(
+                    "weather",
+                    "get_forecasts",
+                    {"entity_id": entity.entity_id, "type": kind},
+                    blocking=True,
+                    return_response=True,
+                )
+        except (HomeAssistantError, TimeoutError) as err:
+            LOGGER.debug("No forecast for %s (%s)", entity.entity_id, err)
+            continue
+        forecast = ((response or {}).get(entity.entity_id) or {}).get("forecast")
+        if kind == "hourly":
+            forecast = (forecast or [])[:FORECAST_HOURS]
+        days = [
+            day
+            for item in forecast or []
+            if (day := _forecast_item(item, kind, state, translations))
+        ]
+        if days:
+            lines.append(f"{state.name}: " + "; ".join(days))
+    return "\n".join(lines)
+
+
+_FORECAST_KINDS = ((1, "daily"), (4, "twice_daily"), (2, "hourly"))
+"""WeatherEntityFeature flags, most useful first."""
+
+
+def _forecast_item(
+    item: dict[str, Any], kind: str, state: State, translations: dict[str, str]
+) -> str:
+    """One entry, e.g. "Sat Oct 17 partly cloudy, 76/67 °F, 0.0 in precipitation"."""
+    if (when := dt_util.parse_datetime(str(item.get("datetime") or ""))) is None:
+        return ""
+    when = dt_util.as_local(when)
+    label = f"{when:%a %b} {when.day}"
+    if kind == "hourly":
+        label += f" {when:%H}:00"
+    elif kind == "twice_daily" and item.get("is_daytime") is False:
+        label += " night"
+    said: list[str] = []
+    if condition := item.get("condition"):
+        said.append(state_word(translations, "weather", None, condition))
+    unit = state.attributes.get("temperature_unit") or ""
+    if (high := item.get("temperature")) is not None:
+        low = item.get("templow")
+        said.append(f"{high}/{low} {unit}" if low is not None else f"{high} {unit}")
+    if (chance := item.get("precipitation_probability")) is not None:
+        said.append(f"{chance}% chance of precipitation")
+    if (rain := item.get("precipitation")) is not None:
+        said.append(
+            f"{rain} {state.attributes.get('precipitation_unit') or ''} precipitation"
+        )
+    return " ".join([label, ", ".join(s.strip() for s in said)]).strip()
 
 
 def async_get_catalog(

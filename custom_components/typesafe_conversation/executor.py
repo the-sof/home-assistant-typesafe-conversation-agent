@@ -25,7 +25,6 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import intent
-from homeassistant.helpers.translation import async_get_translations
 
 from .actions import (
     ACTION_VERBS,
@@ -37,7 +36,13 @@ from .actions import (
     INTENT_TURN_ON,
 )
 from .const import CONVERSATION_DOMAIN, DOMAIN, LOGGER, SCRIPT_REPLY_SECONDS
-from .entities import CONTROLLABLE_DOMAINS, CatalogEntity, EntityCatalog
+from .entities import (
+    CONTROLLABLE_DOMAINS,
+    CatalogEntity,
+    EntityCatalog,
+    async_state_translations,
+    state_word,
+)
 from .router import Plan, Target
 from .script_fields import describe_values
 
@@ -550,8 +555,8 @@ _DESCRIBED_STATES = 5
 
 async def _state_words(hass: HomeAssistant, states: list[State]) -> list[str]:
     """Each state as a person would say it, in the language of the sentence."""
-    translations = await async_get_translations(
-        hass, "en", "entity_component", {state.domain for state in states}
+    translations = await async_state_translations(
+        hass, {state.domain for state in states}
     )
     words: list[str] = []
     for state in states:
@@ -563,12 +568,14 @@ async def _state_words(hass: HomeAssistant, states: list[State]) -> list[str]:
             unit = state.attributes.get("unit_of_measurement")
             words.append(f"{value} {unit}" if unit else value)
             continue
-        device_class = state.attributes.get("device_class") or "_"
-        prefix = f"component.{state.domain}.entity_component"
-        word = translations.get(
-            f"{prefix}.{device_class}.state.{state.state}"
-        ) or translations.get(f"{prefix}._.state.{state.state}")
-        words.append((word or state.state.replace("_", " ")).lower())
+        words.append(
+            state_word(
+                translations,
+                state.domain,
+                state.attributes.get("device_class"),
+                state.state,
+            )
+        )
     return words
 
 

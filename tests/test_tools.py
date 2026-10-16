@@ -12,6 +12,7 @@ import voluptuous as vol
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.helpers import llm
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.test_util.aiohttp import (
     AiohttpClientMocker,
 )
@@ -316,3 +317,39 @@ async def test_the_answer_gets_the_configured_tools(
     tools = llm_backend.answer_freeform.call_args.kwargs["tools"]
     assert [tool.name for tool in tools] == expected
     assert response.speech["plain"]["speech"] == "Kickoff is at 7:30."
+
+
+async def test_the_answer_knows_the_date_and_the_forecast(hass: HomeAssistant):
+    llm_backend = MagicMock()
+    llm_backend.answer_freeform = AsyncMock(return_value="Dry, 76 on Saturday.")
+    agent = TypeSafeAgent(hass, MagicMock(), MagicMock(), llm_backend, AgentSettings())
+    agent.catalog.summarize = MagicMock(return_value="Forecast Home (weather): sunny")
+    now = dt_util.parse_datetime("2026-10-15T17:30:00+00:00")
+
+    with (
+        patch(
+            "custom_components.typesafe_conversation.agent.async_forecast_summary",
+            AsyncMock(return_value="Forecast Home: Sat Oct 17 partly cloudy"),
+        ),
+        patch(
+            "custom_components.typesafe_conversation.agent.dt_util.now",
+            return_value=now,
+        ),
+    ):
+        await agent._answer_freeform(
+            SimpleNamespace(
+                text="what about this weekend?",
+                context=Context(),
+                language="en",
+                device_id=None,
+                satellite_id=None,
+            ),
+            MagicMock(content=[]),
+        )
+
+    kwargs = llm_backend.answer_freeform.call_args.kwargs
+    assert kwargs["weekday"] == "Thursday, October 15, 2026"
+    assert kwargs["home_state"] == (
+        "Forecast Home (weather): sunny\n\n"
+        "Weather forecast:\nForecast Home: Sat Oct 17 partly cloudy"
+    )

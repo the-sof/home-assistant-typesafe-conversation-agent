@@ -31,7 +31,7 @@ from .const import (
     MAX_HISTORY_TURNS,
     PENDING_FILL_SECONDS,
 )
-from .entities import EntityCatalog, _pick_attributes
+from .entities import EntityCatalog, _pick_attributes, async_forecast_summary
 from .executor import (
     ExecutionError,
     async_execute,
@@ -765,6 +765,9 @@ class TypeSafeAgent:
         now = dt_util.now()
         entities = self.catalog.entities[:CATALOG_SUMMARY_MAX_ENTITIES]
         home_state = self.catalog.summarize(entities)
+        # After the summary too, for the prompt cache; it changes about hourly.
+        if forecast := await async_forecast_summary(self.hass, self.catalog.entities):
+            home_state = f"{home_state}\n\nWeather forecast:\n{forecast}"
         if found:
             # After the summary, not before: the unchanged prefix keeps the
             # server's prompt cache warm.
@@ -778,7 +781,9 @@ class TypeSafeAgent:
                 self._history_pairs(chat_log),
                 home_state=home_state,
                 local_time=now.strftime("%H:%M"),
-                weekday=now.strftime("%A"),
+                # With the date: "this weekend" or "tomorrow" means nothing
+                # against a forecast or a search result without it.
+                weekday=f"{now:%A}, {now:%B} {now.day}, {now.year}",
                 speaker_area=self._speaker_area_name(user_input),
                 tools=tools,
             )
