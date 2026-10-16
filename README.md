@@ -298,9 +298,11 @@ DeepSeek V3 models do); one that refuses them is answered without, and not
 asked again until the integration reloads.
 
 Some models search on their own, such as Perplexity's Sonar models or any
-OpenRouter model with `:online` appended (type the full name in the model
-field and pick it as a custom item). Choosing one as `llm_model` needs no web
-search setting at all, at the cost of a search on every general question. The
+OpenRouter model with the `online` variant (pick it in the *Variant* field
+under the model). Choosing one needs no web search setting at all, at the cost
+of a search on every general question. That search uses only the last thing
+said, so a follow-up such as "what about this weekend?" searches poorly; with
+SearXNG the model writes its own query. The
 source links such models add are dropped before the answer is spoken; a link
 you ask for is given as a plain address.
 

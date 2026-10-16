@@ -1147,6 +1147,68 @@ async def test_an_openrouter_variant_of_a_listed_model_is_accepted(
     assert sent["model"] == "a/model:online", "the variant itself was tried"
 
 
+async def test_an_openrouter_variant_is_picked_in_its_own_field(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+):
+    """Typing a:model:online into the picker could land on a listed :batch."""
+    entry, result = await _to_llm_step(hass, aioclient_mock)
+    aioclient_mock.get(
+        "https://openrouter.ai/api/v1/models",
+        json={"data": [{"id": "a/model"}, {"id": "a/model:batch"}]},
+    )
+    aioclient_mock.post(_OPENROUTER_CHAT, json=_CHAT_OK)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"llm_backend": "openai_compatible"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            "llm_base_url": "https://openrouter.ai/api",
+            "llm_model": "a/model",
+            "llm_variant": "online",
+            "llm_api_key": "sk-or",
+        },
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"web_search": "off"}
+    )
+    await hass.async_block_till_done()
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data["llm_model"] == "a/model:online"
+    assert "llm_variant" not in entry.data, "it is part of the model id"
+
+
+def test_the_form_splits_a_saved_variant_and_hides_listed_ones():
+    from custom_components.typesafe_conversation.config_flow import (
+        _llm_settings_schema,
+    )
+
+    schema = _llm_settings_schema(
+        "openai_compatible",
+        {"llm_backend": "openai_compatible", "llm_model": "a/model:online"},
+        ["a/model", "a/model:batch", "b/other"],
+    ).schema
+    model = next(k for k in schema if k == "llm_model")
+    variant = next(k for k in schema if k == "llm_variant")
+    keys = [str(k) for k in schema]
+
+    assert model.description["suggested_value"] == "a/model"
+    assert variant.default() == "online"
+    assert schema[model].config["options"] == ["a/model", "b/other"]
+    assert keys.index("llm_variant") == keys.index("llm_model") + 1
+
+
+def test_ollama_has_no_variant_field():
+    from custom_components.typesafe_conversation.config_flow import (
+        _llm_settings_schema,
+    )
+
+    schema = _llm_settings_schema("ollama", {}, ["qwen3", "qwen3:30b"]).schema
+    assert "llm_variant" not in [str(k) for k in schema]
+    model = next(k for k in schema if k == "llm_model")
+    assert schema[model].config["options"] == ["qwen3", "qwen3:30b"], "tags stay"
+
+
 async def test_a_model_the_server_refuses_is_caught_at_setup(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ):

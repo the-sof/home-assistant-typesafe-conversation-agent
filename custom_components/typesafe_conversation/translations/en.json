@@ -56,12 +56,14 @@
         "data": {
           "llm_base_url": "Base URL",
           "llm_model": "Model",
+          "llm_variant": "Variant (OpenRouter)",
           "llm_api_key": "API key",
           "llm_timeout": "Answer timeout",
           "llm_keep_loaded": "Keep the model loaded (Ollama)"
         },
         "data_description": {
-          "llm_model": "Picked from what the server offers, when it lists its models. For an OpenRouter variant such as :online, type the full name and pick it as a custom item.",
+          "llm_model": "Picked from what the server offers, when it lists its models.",
+          "llm_variant": "OpenRouter only: added to the model's name, so online with deepseek/deepseek-v4.1-flash runs deepseek/deepseek-v4.1-flash:online. Leave it at None for other servers.",
           "llm_api_key": "Needed for OpenRouter and other hosted services. Ollama needs none.",
           "llm_keep_loaded": "Off by default: the server decides when to unload an idle model, so the first question after a pause waits for it to load. Turn this on to load it at startup and keep it in memory, which makes that first answer fast but holds the memory for as long as Home Assistant runs. Change it any time under Reconfigure. Has no effect on hosted backends.",
           "llm_timeout": "How long to wait for an answer. A large local model that has to load first may need more than the default."
