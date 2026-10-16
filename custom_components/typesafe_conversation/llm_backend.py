@@ -134,6 +134,12 @@ weather or opening hours; answer stable general knowledge directly. Never say yo
 cannot check or do not know something without looking it up first. If a lookup \
 fails, say you could not check."""
 
+_FINAL_ROUND = {
+    "role": "system",
+    "content": "No more lookups are possible. Answer now from what you found, "
+    "or say briefly that you could not find it.",
+}
+
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 _ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 _OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -352,7 +358,9 @@ class LLMBackend(ABC):
                     final = round_no == MAX_TOOL_ROUNDS
                     try:
                         turn = await self._chat_tools(
-                            messages,
+                            # Told only that it may not search, a model that
+                            # wanted to can return nothing at all.
+                            [*messages, _FINAL_ROUND] if final else messages,
                             specs,
                             max_tokens=ANSWER_MAX_TOKENS,
                             temperature=ANSWER_TEMPERATURE,

@@ -657,6 +657,16 @@ async def test_the_model_must_answer_after_the_last_round(
     assert len(sent) == MAX_TOOL_ROUNDS + 1
     assert not any(is_final(payload) for payload in sent[:-1])
     assert is_final(sent[-1])
+    # Told only that it may not search, a model can return nothing at all.
+    last = sent[-1]["messages"][-1]
+    assert last["role"] == "system"
+    assert last["content"].startswith("No more lookups are possible")
+    assert not any(
+        m["content"].startswith("No more lookups")
+        for payload in sent[:-1]
+        for m in payload["messages"]
+        if isinstance(m.get("content"), str)
+    )
 
 
 async def test_a_failed_lookup_reaches_the_model_and_it_still_answers(session, mocker):

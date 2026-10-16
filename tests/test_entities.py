@@ -98,3 +98,124 @@ async def test_attributes_are_pruned_per_domain(hass: HomeAssistant):
     catalog = EntityCatalog(hass, conversation.DOMAIN)
     attrs = catalog.snapshot()["entities"][0]["attrs"]
     assert attrs == {"brightness": 128}
+
+
+# --- the weather forecast an LLM answer gets ----------------------------------
+
+
+def _weather(entity_id: str = "weather.home"):
+    from custom_components.typesafe_conversation.entities import CatalogEntity
+
+    return CatalogEntity(
+        entity_id=entity_id,
+        name="Forecast Home",
+        aliases=(),
+        area_id=None,
+        area_name=None,
+        floor_name=None,
+        domain="weather",
+        device_class=None,
+        supported_features=1,
+    )
+
+
+def _serve_forecasts(hass: HomeAssistant, forecast=None, error=None) -> list:
+    from homeassistant.core import ServiceCall, SupportsResponse
+
+    calls: list[ServiceCall] = []
+
+    async def get_forecasts(call: ServiceCall):
+        calls.append(call)
+        if error is not None:
+            raise error
+        return {"weather.home": {"forecast": forecast or []}}
+
+    hass.services.async_register(
+        "weather",
+        "get_forecasts",
+        get_forecasts,
+        supports_response=SupportsResponse.ONLY,
+    )
+    return calls
+
+
+def _set_weather(hass: HomeAssistant, features: int) -> None:
+    hass.states.async_set(
+        "weather.home",
+        "partlycloudy",
+        {
+            "friendly_name": "Forecast Home",
+            "supported_features": features,
+            "temperature_unit": "°F",
+            "precipitation_unit": "in",
+        },
+    )
+
+
+async def test_the_forecast_is_summarised_day_by_day(hass: HomeAssistant):
+    from custom_components.typesafe_conversation.entities import (
+        async_forecast_summary,
+    )
+
+    await hass.config.async_set_time_zone("UTC")
+    _set_weather(hass, features=1 | 2)
+    calls = _serve_forecasts(
+        hass,
+        [
+            {
+                "datetime": "2026-10-17T16:00:00+00:00",
+                "condition": "partlycloudy",
+                "temperature": 76,
+                "templow": 67,
+                "precipitation": 0.0,
+            },
+            {
+                "datetime": "2026-10-18T16:00:00+00:00",
+                "condition": "rainy",
+                "temperature": 70,
+                "templow": 60,
+                "precipitation_probability": 80,
+            },
+        ],
+    )
+
+    summary = await async_forecast_summary(hass, [_weather()])
+
+    assert calls[0].data["type"] == "daily", "daily is preferred over hourly"
+    assert summary == (
+        "Forecast Home: Sat Oct 17 partly cloudy, 76/67 °F, 0.0 in precipitation; "
+        "Sun Oct 18 rainy, 70/60 °F, 80% chance of precipitation"
+    )
+
+
+async def test_no_forecast_feature_means_no_forecast(hass: HomeAssistant):
+    from custom_components.typesafe_conversation.entities import (
+        async_forecast_summary,
+    )
+
+    _set_weather(hass, features=0)
+    calls = _serve_forecasts(hass)
+
+    assert await async_forecast_summary(hass, [_weather()]) == ""
+    assert not calls
+
+
+async def test_a_failing_forecast_never_costs_the_answer(hass: HomeAssistant):
+    from homeassistant.exceptions import HomeAssistantError
+
+    from custom_components.typesafe_conversation.entities import (
+        async_forecast_summary,
+    )
+
+    _set_weather(hass, features=1)
+    _serve_forecasts(hass, error=HomeAssistantError("provider down"))
+
+    assert await async_forecast_summary(hass, [_weather()]) == ""
+
+
+async def test_a_home_without_weather_asks_for_nothing(hass: HomeAssistant):
+    from custom_components.typesafe_conversation.entities import (
+        async_forecast_summary,
+    )
+
+    assert await async_forecast_summary(hass, []) == ""

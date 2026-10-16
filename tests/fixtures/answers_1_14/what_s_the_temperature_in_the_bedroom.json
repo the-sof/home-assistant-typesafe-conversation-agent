@@ -1,0 +1,290 @@
+{
+  "utterance": "what's the temperature in the bedroom?",
+  "expected": "query temperature",
+  "spoken_from_area": "kitchen",
+  "response": {
+    "model": "jev-1.14.0",
+    "answers": {
+      "category": {
+        "type": "choice",
+        "choice": "query",
+        "confidence": 1.0,
+        "probabilities": {
+          "command": 0.0,
+          "query": 1.0,
+          "information": 0.0,
+          "cancel": 0.0,
+          "unclear": 0.0
+        }
+      },
+      "compound": {
+        "type": "noul",
+        "noul": 0.03
+      },
+      "scope": {
+        "type": "choice",
+        "choice": "single",
+        "confidence": 0.59,
+        "probabilities": {
+          "whole_house": 0.0,
+          "floor": 0.0,
+          "area": 0.32,
+          "single": 0.67,
+          "not_a_target": 0.01
+        }
+      },
+      "here_relative": {
+        "type": "noul",
+        "noul": 0.03
+      },
+      "change_direction": {
+        "type": "choice",
+        "choice": "no_numeric",
+        "confidence": 0.87,
+        "probabilities": {
+          "absolute": 0.09,
+          "increase": 0.01,
+          "decrease": 0.0,
+          "no_numeric": 0.9
+        }
+      },
+      "magnitude": {
+        "type": "choice",
+        "choice": "not_applicable",
+        "confidence": 1.0,
+        "probabilities": {
+          "slight": 0.0,
+          "moderate": 0.0,
+          "large": 0.0,
+          "maximum": 0.0,
+          "not_applicable": 1.0
+        }
+      },
+      "query_kind": {
+        "type": "choice",
+        "choice": "temperature",
+        "confidence": 1.0,
+        "probabilities": {
+          "device_state": 0.0,
+          "count": 0.0,
+          "temperature": 1.0,
+          "time_or_date": 0.0,
+          "needs_prose": 0.0,
+          "not_a_query": 0.0
+        }
+      },
+      "risky": {
+        "type": "noul",
+        "noul": 0.02
+      },
+      "target_area": {
+        "type": "choice",
+        "choice": "bedroom",
+        "confidence": 0.99,
+        "probabilities": {
+          "kitchen": 0.0,
+          "living_room": 0.0,
+          "hall": 0.0,
+          "office": 0.0,
+          "bedroom": 0.99,
+          "kids_room": 0.0,
+          "bathroom": 0.0,
+          "garage": 0.0,
+          "no_area": 0.01
+        }
+      },
+      "target_entity": {
+        "type": "choice",
+        "choice": "no_single_entity",
+        "confidence": 0.98,
+        "probabilities": {
+          "light.kitchen_ceiling": 0.0,
+          "light.kitchen_under_cabinet": 0.0,
+          "switch.coffee_maker": 0.0,
+          "switch.dishwasher": 0.0,
+          "sensor.kitchen_temperature": 0.02,
+          "light.lr_ceiling": 0.0,
+          "light.lr_floor_lamp": 0.0,
+          "cover.lr_blinds": 0.0,
+          "media_player.living_room_speaker": 0.0,
+          "media_player.tv": 0.0,
+          "climate.living_room": 0.0,
+          "lock.front_door": 0.0,
+          "light.hall": 0.0,
+          "binary_sensor.front_door_contact": 0.0,
+          "light.office_desk": 0.0,
+          "lock.office_door": 0.0,
+          "cover.office_blinds": 0.0,
+          "light.bedroom_ceiling": 0.0,
+          "light.bedside_lamp": 0.0,
+          "fan.bedroom": 0.0,
+          "cover.bedroom_blinds": 0.0,
+          "light.kids_ceiling": 0.0,
+          "light.bathroom": 0.0,
+          "binary_sensor.bathroom_window": 0.0,
+          "cover.garage_door": 0.0,
+          "vacuum.downstairs": 0.0,
+          "scene.movie_night": 0.0,
+          "scene.good_morning": 0.0,
+          "script.bedtime": 0.0,
+          "no_single_entity": 0.98
+        }
+      },
+      "target_domain": {
+        "type": "choice",
+        "choice": "sensor",
+        "confidence": 0.9,
+        "probabilities": {
+          "binary_sensor": 0.0,
+          "climate": 0.03,
+          "cover": 0.0,
+          "fan": 0.0,
+          "light": 0.0,
+          "lock": 0.0,
+          "media_player": 0.0,
+          "scene": 0.0,
+          "script": 0.0,
+          "sensor": 0.91,
+          "switch": 0.0,
+          "vacuum": 0.0,
+          "none": 0.06
+        }
+      },
+      "action_climate": {
+        "type": "choice",
+        "choice": "not_targeted",
+        "confidence": 0.92,
+        "probabilities": {
+          "turn_on": 0.01,
+          "turn_off": 0.0,
+          "set_temperature": 0.04,
+          "warmer": 0.01,
+          "cooler": 0.0,
+          "not_targeted": 0.93
+        }
+      },
+      "action_cover": {
+        "type": "choice",
+        "choice": "not_targeted",
+        "confidence": 1.0,
+        "probabilities": {
+          "open": 0.0,
+          "close": 0.0,
+          "stop": 0.0,
+          "set_position": 0.0,
+          "not_targeted": 1.0
+        }
+      },
+      "action_fan": {
+        "type": "choice",
+        "choice": "not_targeted",
+        "confidence": 0.98,
+        "probabilities": {
+          "turn_on": 0.01,
+          "turn_off": 0.0,
+          "set_speed": 0.01,
+          "faster": 0.0,
+          "slower": 0.0,
+          "not_targeted": 0.98
+        }
+      },
+      "action_light": {
+        "type": "choice",
+        "choice": "not_targeted",
+        "confidence": 1.0,
+        "probabilities": {
+          "turn_on": 0.0,
+          "turn_off": 0.0,
+          "toggle": 0.0,
+          "set_brightness": 0.0,
+          "brighter": 0.0,
+          "dimmer": 0.0,
+          "set_color": 0.0,
+          "not_targeted": 1.0
+        }
+      },
+      "action_lock": {
+        "type": "choice",
+        "choice": "not_targeted",
+        "confidence": 1.0,
+        "probabilities": {
+          "lock": 0.0,
+          "unlock": 0.0,
+          "not_targeted": 1.0
+        }
+      },
+      "action_media_player": {
+        "type": "choice",
+        "choice": "not_targeted",
+        "confidence": 1.0,
+        "probabilities": {
+          "play": 0.0,
+          "pause": 0.0,
+          "next": 0.0,
+          "previous": 0.0,
+          "set_volume": 0.0,
+          "louder": 0.0,
+          "quieter": 0.0,
+          "mute": 0.0,
+          "unmute": 0.0,
+          "search_and_play": 0.0,
+          "not_targeted": 1.0
+        }
+      },
+      "action_scene": {
+        "type": "choice",
+        "choice": "not_targeted",
+        "confidence": 0.98,
+        "probabilities": {
+          "activate": 0.01,
+          "not_targeted": 0.99
+        }
+      },
+      "action_script": {
+        "type": "choice",
+        "choice": "not_targeted",
+        "confidence": 1.0,
+        "probabilities": {
+          "run": 0.0,
+          "not_targeted": 1.0
+        }
+      },
+      "action_switch": {
+        "type": "choice",
+        "choice": "not_targeted",
+        "confidence": 1.0,
+        "probabilities": {
+          "turn_on": 0.0,
+          "turn_off": 0.0,
+          "toggle": 0.0,
+          "not_targeted": 1.0
+        }
+      },
+      "action_vacuum": {
+        "type": "choice",
+        "choice": "not_targeted",
+        "confidence": 0.97,
+        "probabilities": {
+          "start": 0.0,
+          "return_to_base": 0.0,
+          "clean_area": 0.02,
+          "not_targeted": 0.98
+        }
+      },
+      "media_query_span": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 1.0,
+        "probabilities": {
+          "what's the temperature": 0.0,
+          "the bedroom": 0.0,
+          "none": 1.0
+        }
+      }
+    },
+    "usage": {
+      "input_tokens": 6538,
+      "output_tokens": 1519
+    }
+  }
+}

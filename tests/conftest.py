@@ -1,7 +1,8 @@
 """Shared fixtures.
 
-The answer fixtures under ``fixtures/answers`` are *real* recorded Jev
-responses, captured by ``scripts/calibrate.py --record``. Routing is tested by
+The answer fixtures under ``fixtures/answers`` (jev-1.13.0) and
+``fixtures/answers_1_14`` (jev-1.14.0, the same utterances) are *real* recorded
+Jev responses, captured by ``scripts/calibrate.py --record``. Routing is tested by
 replaying them, so the tests describe how the model actually behaves rather
 than how we imagine it behaves.
 """
@@ -24,6 +25,7 @@ from custom_components.typesafe_conversation.system_one import (
 
 FIXTURES = Path(__file__).parent / "fixtures"
 ANSWERS = FIXTURES / "answers"
+ANSWERS_1_14 = FIXTURES / "answers_1_14"
 
 
 def load_home() -> dict:
@@ -55,9 +57,9 @@ def build_catalog() -> tuple[tuple[CatalogEntity, ...], tuple[CatalogArea, ...]]
     return entities, areas
 
 
-def load_response(name: str) -> tuple[SystemOneResponse, dict]:
+def load_response(name: str, answers: Path = ANSWERS) -> tuple[SystemOneResponse, dict]:
     """Load one recorded response, parsed into the client's answer types."""
-    payload = json.loads((ANSWERS / f"{name}.json").read_text())
+    payload = json.loads((answers / f"{name}.json").read_text())
     body = payload["response"]
     response = SystemOneResponse(
         model=body["model"],

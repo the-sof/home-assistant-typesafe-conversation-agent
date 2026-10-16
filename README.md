@@ -173,9 +173,10 @@ Three things are worth knowing before you rely on it:
 
   then `ollama create tev1-16k -f Modelfile`, and choose `tev1-16k`.
 - **Thresholds were fitted to Jev.** Every routing threshold in `const.py` comes
-  from `jev-1.13.0`'s answers. Another model's probabilities are shaped
-  differently, so it may ask "did you mean…?" too often or act too readily until
-  they are re-fitted with `scripts/calibrate.py --base-url`.
+  from `jev-1.13.0`'s answers, and the routing tests replay `jev-1.14.0` too.
+  Another model's probabilities are shaped differently, so it may ask "did you
+  mean…?" too often or act too readily until they are re-fitted with
+  `scripts/calibrate.py --base-url`.
 
 Local servers also accept fewer options per question - Ollama allows 26 - so a
 home with more exposed entities than that picks its device in two requests: the
@@ -258,6 +259,9 @@ and `always_confirm_risky`, `bypass_local_intents` and
 
 ### Web search
 
+Weather needs none of this: an answer is given the coming days' forecast of
+any weather entity exposed to Assist, along with today's date.
+
 Without it, a question about anything current — tonight's game, the news, a
 shop's hours — gets a guess or "I don't know". Turn it on in the **Web search**
 step under **Reconfigure**, after the language model, and pick where lookups
@@ -294,9 +298,11 @@ DeepSeek V3 models do); one that refuses them is answered without, and not
 asked again until the integration reloads.
 
 Some models search on their own, such as Perplexity's Sonar models or any
-OpenRouter model with `:online` appended (type the full name in the model
-field and pick it as a custom item). Choosing one as `llm_model` needs no web
-search setting at all, at the cost of a search on every general question. The
+OpenRouter model with the `online` variant (pick it in the *Variant* field
+under the model). Choosing one needs no web search setting at all, at the cost
+of a search on every general question. That search uses only the last thing
+said, so a follow-up such as "what about this weekend?" searches poorly; with
+SearXNG the model writes its own query. The
 source links such models add are dropped before the answer is spoken; a link
 you ask for is given as a plain address.
 
@@ -471,14 +477,18 @@ CI runs the suite against both ends of the supported range on every push and
 pull request, deriving those requirements the same way.
 
 The routing tests replay **real recorded Jev responses** from
-`tests/fixtures/answers/`, so they describe how the model actually behaves
-rather than how we imagine it does. To re-record them, or to re-fit the
-thresholds in `const.py` against your own home:
+`tests/fixtures/answers/` (`jev-1.13.0`) and `tests/fixtures/answers_1_14/`
+(`jev-1.14.0`), so they describe how the model actually behaves rather than how
+we imagine it does. To re-record them, or to re-fit the thresholds in
+`const.py` against your own home:
 
 ```sh
 set -a; . ./.env; set +a
 .venv/bin/python scripts/calibrate.py --csv out.csv --record tests/fixtures/answers
 ```
+
+A cases file for `--cases` holds `[utterance, expected]` pairs, or
+`[utterance, expected, language]` to send a request in another language.
 
 Every threshold is a named constant in `const.py` precisely so it can be
 re-fitted rather than argued about.

@@ -31,13 +31,14 @@ from .const import (
     MAX_HISTORY_TURNS,
     PENDING_FILL_SECONDS,
 )
-from .entities import EntityCatalog
+from .entities import EntityCatalog, _pick_attributes, async_forecast_summary
 from .executor import (
     ExecutionError,
     async_execute,
     async_execute_cancel,
     async_execute_query,
     describe_action,
+    describe_query,
 )
 from .extraction import extract
 from .llm_backend import LLMBackend, LLMBackendError
@@ -407,10 +408,13 @@ class TypeSafeAgent:
                 if plan.query_kind == "needs_prose":
                     return await self._answer_freeform(user_input, chat_log)
                 try:
-                    return await async_execute_query(self.hass, plan, user_input)
+                    result = await async_execute_query(self.hass, plan, user_input)
                 except (ExecutionError, intent.IntentError) as err:
                     LOGGER.debug("Query execution failed (%s)", err)
                     return await self._answer_freeform(user_input, chat_log)
+                if _spoken(result):
+                    return result
+                return await self._put_into_words(plan, result, user_input, chat_log)
 
             case Route.CLARIFY:
                 names = " or ".join(name for _, name in plan.options)
@@ -611,9 +615,11 @@ class TypeSafeAgent:
                         f"{part} ({_join(refused)} did not respond, "
                         "though the rest of that may have changed)"
                     )
-                elif plan.route is Route.QUERY and (answer := _spoken(result)):
+                elif plan.route is Route.QUERY:
                     # The answer is the point of a question; keep what it said.
-                    answers.append(answer)
+                    answers.append(
+                        _spoken(result) or await describe_query(self.hass, plan, result)
+                    )
                 else:
                     done.append(plan.target.described)
             if failed:
@@ -714,11 +720,42 @@ class TypeSafeAgent:
             "Sorry, I'm not sure what you'd like me to do.",
         )
 
+    async def _put_into_words(
+        self,
+        plan: Plan,
+        result: intent.IntentResponse,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+    ) -> intent.IntentResponse:
+        """Speech for an answer the state handlers left without any.
+
+        The LLM phrases it best, given what the handler found: the home state
+        summary alone holds no attributes and stops at a cap, so it may not
+        have the answer. Without an LLM, or if it fails, the plain sentence.
+        """
+        described = await describe_query(self.hass, plan, result)
+        if self.llm is not None:
+            found = [described]
+            found += [
+                f"{state.name}: {state.state} {attributes}"
+                for state in [*result.matched_states, *result.unmatched_states]
+                if (attributes := _pick_attributes(state.domain, state))
+            ]
+            answer = await self._answer_freeform(
+                user_input, chat_log, found="\n".join(found)
+            )
+            if answer.response_type is not intent.IntentResponseType.ERROR:
+                return answer
+        result.async_set_speech(described)
+        return result
+
     async def _answer_freeform(
         self,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
+        found: str | None = None,
     ) -> intent.IntentResponse:
+        """Answer in prose. ``found`` is what the home reported for this question."""
         if self.llm is None:
             return self._error(
                 user_input,
@@ -727,6 +764,14 @@ class TypeSafeAgent:
             )
         now = dt_util.now()
         entities = self.catalog.entities[:CATALOG_SUMMARY_MAX_ENTITIES]
+        home_state = self.catalog.summarize(entities)
+        # After the summary too, for the prompt cache; it changes about hourly.
+        if forecast := await async_forecast_summary(self.hass, self.catalog.entities):
+            home_state = f"{home_state}\n\nWeather forecast:\n{forecast}"
+        if found:
+            # After the summary, not before: the unchanged prefix keeps the
+            # server's prompt cache warm.
+            home_state = f"{home_state}\n\nFound for this question:\n{found}"
         tools = await async_answer_tools(
             self.hass, self.settings.web_search or {}, user_input
         )
@@ -734,9 +779,11 @@ class TypeSafeAgent:
             answer = await self.llm.answer_freeform(
                 user_input.text,
                 self._history_pairs(chat_log),
-                home_state=self.catalog.summarize(entities),
+                home_state=home_state,
                 local_time=now.strftime("%H:%M"),
-                weekday=now.strftime("%A"),
+                # With the date: "this weekend" or "tomorrow" means nothing
+                # against a forecast or a search result without it.
+                weekday=f"{now:%A}, {now:%B} {now.day}, {now.year}",
                 speaker_area=self._speaker_area_name(user_input),
                 tools=tools,
             )

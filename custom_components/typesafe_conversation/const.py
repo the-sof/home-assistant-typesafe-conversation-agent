@@ -68,6 +68,16 @@ CONF_SERVER_PROFILE: Final = "server_profile"
 CONF_LLM_BACKEND: Final = "llm_backend"
 CONF_LLM_BASE_URL: Final = "llm_base_url"
 CONF_LLM_MODEL: Final = "llm_model"
+CONF_LLM_VARIANT: Final = "llm_variant"
+"""Set-up form only: saved as a suffix of CONF_LLM_MODEL, never on its own."""
+OPENROUTER_VARIANTS: Final = {
+    "online": "online: search the web on every answer",
+    "nitro": "nitro: the fastest provider",
+    "floor": "floor: the cheapest provider",
+    "free": "free: the free tier, where offered",
+    "exacto": "exacto: providers vetted for tool calls",
+}
+"""OpenRouter's model variants, appended to the model id as ``:variant``."""
 CONF_LLM_API_KEY: Final = "llm_api_key"
 CONF_LLM_REFERER: Final = "llm_referer"
 CONF_LLM_TITLE: Final = "llm_title"
@@ -165,6 +175,12 @@ Those entries all point at TypeSafe, which accepts 255. Newer entries use the
 cap discovered for their own server instead."""
 MAX_HISTORY_TURNS: Final = 2
 CATALOG_SUMMARY_MAX_ENTITIES: Final = 120
+FORECAST_MAX_ENTITIES: Final = 2
+"""Weather entities whose forecast goes into an LLM answer's home state."""
+FORECAST_HOURS: Final = 12
+"""Hourly entries kept when an entity offers no daily forecast."""
+FORECAST_TIMEOUT: Final = 2.0
+"""Seconds to wait for a forecast before answering without it."""
 TRACE_HISTORY: Final = 20
 """How many recent request traces to keep for the diagnostics download."""
 

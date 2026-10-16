@@ -194,3 +194,80 @@ async def test_one_device_refusing_stops_the_rest(hass: HomeAssistant):
     assert "Hall Light did not respond" in _speech(response)
     assert "may have changed" in _speech(response), "the Lamp did go off"
     assert "stopped before lock the door" in _speech(response)
+
+
+def _silent_answer() -> intent.IntentResponse:
+    """What HassGetState returns: the state, but no words."""
+    from homeassistant.core import State
+
+    response = intent.IntentResponse(language="en")
+    response.async_set_states(
+        [State("weather.home", "rainy", {"friendly_name": "Forecast Home"})]
+    )
+    return response
+
+
+async def test_a_question_part_is_answered_not_done(hass: HomeAssistant):
+    parts = ["turn on the lamp", "is it raining"]
+    plans = {
+        "turn on the lamp": _plan(Route.COMMAND, "Lamp"),
+        "is it raining": Plan(route=Route.QUERY),
+    }
+
+    with patch(
+        f"{AGENT}.async_execute_query", AsyncMock(return_value=_silent_answer())
+    ):
+        response = await _run(
+            _agent(hass, parts), "...", plans, AsyncMock(return_value=_done())
+        )
+
+    assert _speech(response) == "Done: Lamp. Forecast Home is rainy."
+
+
+async def _ask_one(agent: TypeSafeAgent) -> intent.IntentResponse:
+    with (
+        patch(
+            f"{AGENT}.conversation.async_handle_intents", AsyncMock(return_value=None)
+        ),
+        patch(f"{AGENT}.async_execute_query", AsyncMock(return_value=_silent_answer())),
+    ):
+        return await agent._carry_out(
+            Plan(route=Route.QUERY), MagicMock(), _input("is it raining?"), MagicMock()
+        )
+
+
+async def test_a_question_without_words_is_described(hass: HomeAssistant):
+    agent = _agent(hass, [])
+    agent.llm = None
+
+    response = await _ask_one(agent)
+
+    assert _speech(response) == "Forecast Home is rainy."
+
+
+async def test_a_question_without_words_is_phrased_by_the_llm(hass: HomeAssistant):
+    agent = _agent(hass, [])
+    agent._answer_freeform = AsyncMock(
+        return_value=agent._speech(_input("is it raining?"), "Yes, it's raining.")
+    )
+
+    response = await _ask_one(agent)
+
+    assert _speech(response) == "Yes, it's raining."
+    found = agent._answer_freeform.await_args.kwargs["found"]
+    assert "Forecast Home is rainy." in found, "the LLM is told what was found"
+
+
+async def test_a_failed_llm_still_leaves_an_answer(hass: HomeAssistant):
+    agent = _agent(hass, [])
+    agent._answer_freeform = AsyncMock(
+        return_value=agent._error(
+            _input("is it raining?"),
+            intent.IntentResponseErrorCode.UNKNOWN,
+            "Sorry, I can't answer that right now.",
+        )
+    )
+
+    response = await _ask_one(agent)
+
+    assert _speech(response) == "Forecast Home is rainy."

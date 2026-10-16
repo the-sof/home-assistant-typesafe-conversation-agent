@@ -22,7 +22,7 @@ from homeassistant.const import (
     STATE_UNKNOWN,
     UnitOfTemperature,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import intent
 
@@ -36,7 +36,13 @@ from .actions import (
     INTENT_TURN_ON,
 )
 from .const import CONVERSATION_DOMAIN, DOMAIN, LOGGER, SCRIPT_REPLY_SECONDS
-from .entities import CONTROLLABLE_DOMAINS, CatalogEntity, EntityCatalog
+from .entities import (
+    CONTROLLABLE_DOMAINS,
+    CatalogEntity,
+    EntityCatalog,
+    async_state_translations,
+    state_word,
+)
 from .router import Plan, Target
 from .script_fields import describe_values
 
@@ -508,6 +514,71 @@ def describe_action(plan: Plan, response: intent.IntentResponse | None = None) -
     return f"{verb} {plan.target.described}."
 
 
+async def describe_query(
+    hass: HomeAssistant, plan: Plan, response: intent.IntentResponse
+) -> str:
+    """Compose speech for a question that was answered.
+
+    The state, temperature and time handlers report states or speech slots
+    but no speech, for the same reason as in describe_action. An answer with
+    no words is worse than a plain one: the pipeline says nothing, and the
+    Assist chat cannot show it.
+    """
+    slots = response.speech_slots or {}
+    if (now := slots.get("time")) is not None:
+        hour = now.hour % 12 or 12
+        return f"It's {hour}:{now.minute:02d} {'AM' if now.hour < 12 else 'PM'}."
+    if (today := slots.get("date")) is not None:
+        return f"Today is {today:%A, %B} {today.day}."
+
+    states = [*response.matched_states, *response.unmatched_states]
+    if plan.query_kind == "temperature":
+        for state in states:
+            if (current := state.attributes.get("current_temperature")) is not None:
+                unit = hass.config.units.temperature_unit
+                return f"{state.name} is at {current} {unit}."
+    if not states:
+        return "I couldn't find that."
+
+    shown = states[:_DESCRIBED_STATES]
+    words = await _state_words(hass, shown)
+    said = [f"{state.name} is {word}" for state, word in zip(shown, words, strict=True)]
+    more = len(states) - len(shown)
+    if more:
+        said.append(f"and {more} more")
+    return "; ".join(said) + "."
+
+
+_DESCRIBED_STATES = 5
+"""Beyond this many devices a spoken list stops being an answer."""
+
+
+async def _state_words(hass: HomeAssistant, states: list[State]) -> list[str]:
+    """Each state as a person would say it, in the language of the sentence."""
+    translations = await async_state_translations(
+        hass, {state.domain for state in states}
+    )
+    words: list[str] = []
+    for state in states:
+        if state.domain == "sensor":
+            # Respect the user's configured display precision.
+            from homeassistant.components.sensor import async_rounded_state
+
+            value = async_rounded_state(hass, state.entity_id, state)
+            unit = state.attributes.get("unit_of_measurement")
+            words.append(f"{value} {unit}" if unit else value)
+            continue
+        words.append(
+            state_word(
+                translations,
+                state.domain,
+                state.attributes.get("device_class"),
+                state.state,
+            )
+        )
+    return words
+
+
 __all__ = [
     "ExecutionError",
     "async_execute",
@@ -515,4 +586,5 @@ __all__ = [
     "async_execute_query",
     "build_slots",
     "describe_action",
+    "describe_query",
 ]

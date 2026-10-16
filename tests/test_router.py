@@ -1,22 +1,23 @@
 """Replay recorded Jev answers through the router.
 
-Every fixture here is a real response from jev-1.13.0 against
-``tests/fixtures/home.json``. If a threshold in const.py changes, these tests
-say exactly which utterances start behaving differently.
+Every fixture here is a real response from jev-1.13.0, and the main cases are
+replayed from jev-1.14.0 too, against ``tests/fixtures/home.json``. If a
+threshold in const.py changes, or the model does, these tests say exactly which
+utterances start behaving differently.
 """
 
 from __future__ import annotations
 
 import pytest
-from conftest import load_response
+from conftest import ANSWERS, ANSWERS_1_14, load_response
 
 from custom_components.typesafe_conversation.extraction import extract
 from custom_components.typesafe_conversation.router import Route, route
 from custom_components.typesafe_conversation.system_one import ChoiceAnswer
 
 
-def _route(name: str, entities_by_id, available_domains):
-    response, payload = load_response(name)
+def _route(name: str, entities_by_id, available_domains, answers=ANSWERS):
+    response, payload = load_response(name, answers)
     utterance = payload["utterance"]
     extraction = extract(
         utterance,
@@ -57,9 +58,17 @@ CASES = [
 ]
 
 
+MODELS = pytest.mark.parametrize(
+    "answers", [ANSWERS, ANSWERS_1_14], ids=["jev-1.13", "jev-1.14"]
+)
+
+
+@MODELS
 @pytest.mark.parametrize(("name", "expected", "domain", "action"), CASES)
-def test_routes(name, expected, domain, action, entities_by_id, available_domains):
-    plan, utterance = _route(name, entities_by_id, available_domains)
+def test_routes(
+    name, expected, domain, action, answers, entities_by_id, available_domains
+):
+    plan, utterance = _route(name, entities_by_id, available_domains, answers)
     assert plan.route is expected, f"{utterance!r}: {plan.reason} / {plan.trace}"
     if domain is not None:
         assert plan.domain == domain, utterance
@@ -128,23 +137,27 @@ def test_unlocking_asks_before_acting(entities_by_id, available_domains):
     assert plan.trace["risky"] > 0.9
 
 
-def test_ambiguous_target_asks_which_one(entities_by_id, available_domains):
+@MODELS
+def test_ambiguous_target_asks_which_one(answers, entities_by_id, available_domains):
     plan, _ = _route(
-        "turn_on_the_thing_in_the_corner", entities_by_id, available_domains
+        "turn_on_the_thing_in_the_corner", entities_by_id, available_domains, answers
     )
     assert plan.route in (Route.CLARIFY, Route.FALLBACK)
     if plan.route is Route.CLARIFY:
         assert len(plan.options) == 2
 
 
-def test_whole_house_command_never_lacks_a_target(entities_by_id, available_domains):
+@MODELS
+def test_whole_house_command_never_lacks_a_target(
+    answers, entities_by_id, available_domains
+):
     """'turn off everything' names no domain.
 
     An intent with no name/area/floor/domain constraint raises
     IntentHandleError, so the plan must say whole_house and let the executor
     fan out over the domains that exist.
     """
-    plan, _ = _route("turn_off_everything", entities_by_id, available_domains)
+    plan, _ = _route("turn_off_everything", entities_by_id, available_domains, answers)
     if plan.route is Route.COMMAND:
         assert plan.target.whole_house is True
         assert plan.action == "turn_off"
@@ -470,3 +483,172 @@ def test_a_genuine_tie_is_still_asked_about(entities_by_id, available_domains):
         "light.office_desk",
         "light.hall",
     }
+
+
+# --- whole house, or one device that serves it --------------------------------
+#
+# jev-1.14 scores a whole-house scope for a device that serves the whole house:
+# the alarm, the water main. These shapes follow its answers; a whole-house
+# target must only ever come from a request about every device of a kind.
+
+
+def _choice(pick, probabilities, confidence):
+    return {
+        "type": "choice",
+        "choice": pick,
+        "confidence": confidence,
+        "probabilities": probabilities,
+    }
+
+
+WHOLE_HOUSE = _choice("whole_house", {"whole_house": 0.69, "single": 0.30}, 0.61)
+
+
+def test_a_solid_device_beats_a_whole_house_scope(entities_by_id, available_domains):
+    """ "Shut off the water": every switch must not go off with the valve."""
+    plan = _plan(
+        entities_by_id,
+        available_domains,
+        spoken_from="kitchen",
+        scope=WHOLE_HOUSE,
+        target_domain=_choice("switch", {"switch": 0.96, "none": 0.04}, 0.95),
+        target_entity=_choice(
+            "switch.dishwasher",
+            {"switch.dishwasher": 0.68, "no_single_entity": 0.32},
+            0.67,
+        ),
+        action_switch=_choice("turn_off", {"turn_off": 0.89, "toggle": 0.06}, 0.85),
+    )
+
+    assert plan.route is Route.COMMAND
+    assert plan.target.entity.entity_id == "switch.dishwasher"
+    assert plan.target.whole_house is False
+
+
+def test_a_routine_it_cannot_pin_down_is_not_run_everywhere(
+    entities_by_id, available_domains
+):
+    """ "Arm the alarm" leaning to one routine must not run every script."""
+    plan = _plan(
+        entities_by_id,
+        available_domains,
+        spoken_from="kitchen",
+        scope=_choice("whole_house", {"whole_house": 0.75, "single": 0.25}, 0.69),
+        target_domain=_choice("script", {"script": 0.99, "none": 0.01}, 0.99),
+        target_entity=_choice(
+            "script.bedtime",
+            {"script.bedtime": 0.51, "no_single_entity": 0.44},
+            0.49,
+        ),
+        action_script=_choice("run", {"run": 0.65, "not_targeted": 0.35}, 0.30),
+    )
+
+    assert plan.route is not Route.COMMAND
+    assert plan.target.whole_house is False
+
+
+def test_scripts_never_fan_out_to_the_whole_house(entities_by_id, available_domains):
+    plan = _plan(
+        entities_by_id,
+        available_domains,
+        spoken_from="kitchen",
+        scope=_choice("whole_house", {"whole_house": 0.95, "single": 0.05}, 0.94),
+        target_domain=_choice("script", {"script": 0.99, "none": 0.01}, 0.99),
+        target_entity=_choice(
+            "no_single_entity",
+            {"no_single_entity": 0.95, "script.bedtime": 0.05},
+            0.94,
+        ),
+        action_script=_choice("run", {"run": 0.9, "not_targeted": 0.1}, 0.8),
+    )
+
+    assert plan.route is not Route.COMMAND
+    assert plan.target.whole_house is False
+
+
+def test_a_device_it_cannot_pin_down_is_not_everything(
+    entities_by_id, available_domains
+):
+    """With no domain either, leaning to one switch must not turn off the house."""
+    plan = _plan(
+        entities_by_id,
+        available_domains,
+        spoken_from="kitchen",
+        scope=WHOLE_HOUSE,
+        target_domain=_choice("switch", {"switch": 0.5, "none": 0.5}, 0.3),
+        target_entity=_choice(
+            "switch.dishwasher",
+            {"switch.dishwasher": 0.5, "no_single_entity": 0.45},
+            0.45,
+        ),
+        action_switch=_choice("turn_off", {"turn_off": 0.89, "toggle": 0.06}, 0.85),
+    )
+
+    assert plan.route is not Route.COMMAND
+    assert plan.target.whole_house is False
+
+
+def test_a_whole_house_device_is_not_taken_from_the_speakers_room(
+    entities_by_id, available_domains
+):
+    """The office's only lock is not the house lock that was half-named."""
+    plan = _plan(
+        entities_by_id,
+        available_domains,
+        spoken_from="office",
+        scope=WHOLE_HOUSE,
+        target_domain=_choice("lock", {"lock": 0.97, "none": 0.03}, 0.96),
+        target_entity=_choice(
+            "lock.front_door",
+            {"lock.front_door": 0.5, "no_single_entity": 0.45},
+            0.45,
+        ),
+        action_lock=_choice("lock", {"lock": 0.95, "unlock": 0.05}, 0.92),
+    )
+
+    assert plan.route is not Route.COMMAND
+    assert plan.target.area_id != "office"
+    assert plan.reason.startswith("whole_house cannot fan out")
+
+
+def test_every_light_still_means_the_whole_house(entities_by_id, available_domains):
+    """ "Turn off all the lights" names no one light, so it still fans out."""
+    plan = _plan(
+        entities_by_id,
+        available_domains,
+        spoken_from="kitchen",
+        scope=_choice("whole_house", {"whole_house": 0.95, "single": 0.05}, 0.94),
+        target_entity=_choice(
+            "no_single_entity",
+            {"no_single_entity": 0.97, "light.kitchen_ceiling": 0.03},
+            0.96,
+        ),
+        action_light=_choice("turn_off", {"turn_off": 0.95, "turn_on": 0.05}, 0.92),
+    )
+
+    assert plan.route is Route.COMMAND
+    assert plan.target.whole_house is True
+
+
+@MODELS
+def test_a_house_wide_count_ignores_the_room_it_was_asked_in(
+    answers, entities_by_id, available_domains
+):
+    """jev-1.14 scores the kitchen as the area; the scope says the house."""
+    response, payload = load_response("how_many_lights_are_on", answers)
+    response.answers["target_area"] = ChoiceAnswer(
+        choice="kitchen",
+        probabilities={"kitchen": 0.67, "no_area": 0.33},
+        confidence=0.63,
+    )
+    plan = route(
+        response,
+        entities_by_id=entities_by_id,
+        extraction=extract(payload["utterance"], want_media=True, want_color=True),
+        speaker_area_id=payload["spoken_from_area"],
+        available_domains=available_domains,
+    )
+
+    assert plan.route is Route.QUERY
+    assert plan.query_kind == "count"
+    assert plan.target.area_id is None

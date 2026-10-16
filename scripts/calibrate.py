@@ -150,7 +150,8 @@ async def main() -> None:
     parser.add_argument(
         "--cases",
         type=Path,
-        help="JSON file of [utterance, expected] pairs, instead of REGRESSION",
+        help="JSON file of [utterance, expected] or [utterance, expected, language] "
+        "items, instead of REGRESSION",
     )
     parser.add_argument("--area", default="kitchen", help="area the speaker is in")
     parser.add_argument(
@@ -176,7 +177,8 @@ async def main() -> None:
     rows: list[dict] = []
     total_in = total_out = 0
     async with aiohttp.ClientSession() as session:
-        for utterance, expected in cases:
+        for utterance, expected, *rest in cases:
+            language = rest[0] if rest else "en"
             extraction = extract(
                 utterance,
                 want_media="media_player" in domains,
@@ -192,7 +194,7 @@ async def main() -> None:
             state = {
                 "request": {
                     "text": utterance,
-                    "language": "en",
+                    "language": language,
                     "spoken_from_area": args.area,
                     "local_time": "2026-09-20T22:40",
                     "weekday": "Sunday",
@@ -271,7 +273,7 @@ async def main() -> None:
 
             if args.record:
                 args.record.mkdir(parents=True, exist_ok=True)
-                slug = re.sub(r"[^a-z0-9]+", "_", utterance.lower()).strip("_")[:60]
+                slug = re.sub(r"[\W_]+", "_", utterance.lower()).strip("_")[:60]
                 (args.record / f"{slug}.json").write_text(
                     json.dumps(
                         {

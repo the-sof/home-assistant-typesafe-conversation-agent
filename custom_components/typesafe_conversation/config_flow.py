@@ -47,6 +47,7 @@ from .const import (
     CONF_LLM_KEEP_LOADED,
     CONF_LLM_MODEL,
     CONF_LLM_TIMEOUT,
+    CONF_LLM_VARIANT,
     CONF_MODEL,
     CONF_SERVER_PROFILE,
     CONF_WEB_SEARCH,
@@ -62,6 +63,7 @@ from .const import (
     DOMAIN,
     LOGGER,
     MEASURE_UTTERANCE,
+    OPENROUTER_VARIANTS,
     TYPESAFE_CONSOLE_URL,
     WEB_SEARCH_KEYS,
     WEB_SEARCH_LLM_API,
@@ -221,6 +223,10 @@ def _llm_settings_schema(
     same = current.get(CONF_LLM_BACKEND) == backend
     url = current.get(CONF_LLM_BASE_URL) if same else None
     model = current.get(CONF_LLM_MODEL) if same else None
+    variant = _NO_VARIANT
+    if backend == BACKEND_OPENAI_COMPAT:
+        model, variant = split_variant(model)
+        models = _without_listed_variants(models)
     fields: dict[vol.Marker, Any] = {
         vol.Required(
             CONF_LLM_BASE_URL, default=url or _LLM_DEFAULT_URL[backend]
@@ -245,6 +251,25 @@ def _llm_settings_schema(
             NumberSelectorConfig(min=5, max=180, step=5, unit_of_measurement="s")
         ),
     }
+    if backend == BACKEND_OPENAI_COMPAT:
+        variant_field = SelectSelector(
+            SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=_NO_VARIANT, label="None"),
+                    *(
+                        SelectOptionDict(value=name, label=label)
+                        for name, label in OPENROUTER_VARIANTS.items()
+                    ),
+                ]
+            )
+        )
+        # Right below the model it belongs to.
+        ordered: dict[vol.Marker, Any] = {}
+        for marker, selector in fields.items():
+            ordered[marker] = selector
+            if marker == CONF_LLM_MODEL:
+                ordered[vol.Optional(CONF_LLM_VARIANT, default=variant)] = variant_field
+        fields = ordered
     if backend == BACKEND_OLLAMA:
         fields[
             vol.Optional(
@@ -253,6 +278,40 @@ def _llm_settings_schema(
             )
         ] = BooleanSelector()
     return vol.Schema(fields)
+
+
+_NO_VARIANT = "none"
+
+
+def split_variant(model: str | None) -> tuple[str | None, str]:
+    """``vendor/model:online`` -> (``vendor/model``, ``online``), for the form."""
+    base, sep, variant = (model or "").rpartition(":")
+    if sep and base and variant in OPENROUTER_VARIANTS:
+        return base, variant
+    return model, _NO_VARIANT
+
+
+def join_variant(model: str, variant: str | None) -> str:
+    """The model id to save: the picked model with its variant, if any."""
+    base, _ = split_variant(model)
+    if not variant or variant == _NO_VARIANT:
+        return model
+    return f"{base}:{variant}"
+
+
+def _without_listed_variants(models: list[str] | None) -> list[str] | None:
+    """One entry per model: OpenRouter also lists some variants (``:batch``).
+
+    Typing in the model picker filters the list and Enter takes the top
+    match, so a listed variant could be picked in place of the one typed.
+    Variants are chosen in their own field instead.
+    """
+    if models is None:
+        return None
+    listed = set(models)
+    return [
+        m for m in models if not ((base := m.rpartition(":")[0]) and base in listed)
+    ]
 
 
 def _is_localhost(url: str) -> bool:
@@ -489,6 +548,12 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
         models: list[str] | None = None
         reason = ""
         if user_input is not None:
+            shown = user_input
+            user_input = dict(user_input)
+            variant = user_input.pop(CONF_LLM_VARIANT, None)
+            user_input[CONF_LLM_MODEL] = join_variant(
+                user_input[CONF_LLM_MODEL], variant
+            )
             url = normalise_llm_url(backend, user_input[CONF_LLM_BASE_URL])
             key = user_input.get(CONF_LLM_API_KEY) or None
             if not valid_url(url):
@@ -557,7 +622,8 @@ class TypeSafeConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="llm_settings",
             data_schema=self.add_suggested_values_to_schema(
-                _llm_settings_schema(backend, self._data, models), user_input or {}
+                _llm_settings_schema(backend, self._data, models),
+                shown if user_input is not None else {},
             ),
             errors=errors,
             description_placeholders={**_LLM_EXAMPLES, "reason": reason},

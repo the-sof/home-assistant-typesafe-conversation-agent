@@ -563,3 +563,95 @@ async def test_an_unknown_thermostat_setpoint_is_not_assumed(hass: HomeAssistant
         await _sent(
             hass, _relative("warmer", Target(entity=stat), 10, "climate"), [stat]
         )
+
+
+# --- an answered question always has words -----------------------------------
+
+
+async def test_a_state_answer_is_put_into_words(hass: HomeAssistant):
+    """HassGetState reports the state but leaves the speech empty."""
+    await _setup(hass)
+    registry = er.async_get(hass)
+    entry = registry.async_get_or_create("weather", "demo", "home")
+    hass.states.async_set(
+        entry.entity_id, "partlycloudy", {"friendly_name": "Forecast Home"}
+    )
+    _expose(hass, entry.entity_id)
+
+    catalog = EntityCatalog(hass, conversation.DOMAIN)
+    entity = next(e for e in catalog.entities if e.entity_id == entry.entity_id)
+    from custom_components.typesafe_conversation.executor import (
+        async_execute_query,
+        describe_query,
+    )
+
+    plan = Plan(
+        Route.QUERY,
+        query_kind="not_a_query",
+        target=Target(entity=entity, domain="weather"),
+    )
+    response = await async_execute_query(hass, plan, _input(hass))
+    assert not response.speech, "the handler still leaves the words to us"
+
+    assert await describe_query(hass, plan, response) == (
+        "Forecast Home is partly cloudy."
+    )
+
+
+async def test_a_sensor_answer_keeps_its_unit(hass: HomeAssistant):
+    from homeassistant.core import State
+
+    from custom_components.typesafe_conversation.executor import describe_query
+
+    response = intent.IntentResponse(language="en")
+    response.async_set_states(
+        [
+            State(
+                "sensor.porch",
+                "18.5",
+                {"friendly_name": "Porch", "unit_of_measurement": "°C"},
+            )
+        ]
+    )
+
+    said = await describe_query(hass, Plan(Route.QUERY), response)
+
+    assert said == "Porch is 18.5 °C."
+
+
+async def test_a_temperature_answer_reads_the_current_temperature(
+    hass: HomeAssistant,
+):
+    from homeassistant.core import State
+
+    from custom_components.typesafe_conversation.executor import describe_query
+
+    response = intent.IntentResponse(language="en")
+    response.async_set_states(
+        [
+            State(
+                "climate.hall",
+                "heat",
+                {"friendly_name": "Thermostat", "current_temperature": 20.5},
+            )
+        ]
+    )
+
+    said = await describe_query(
+        hass, Plan(Route.QUERY, query_kind="temperature"), response
+    )
+
+    assert said == "Thermostat is at 20.5 °C."
+
+
+async def test_the_time_is_put_into_words(hass: HomeAssistant):
+    from datetime import time
+
+    from custom_components.typesafe_conversation.executor import describe_query
+
+    response = intent.IntentResponse(language="en")
+    response.async_set_speech_slots({"time": time(15, 5)})
+
+    said = await describe_query(hass, Plan(Route.QUERY), response)
+
+    assert said == "It's 3:05 PM."
