@@ -271,3 +271,91 @@ async def test_a_failed_llm_still_leaves_an_answer(hass: HomeAssistant):
     response = await _ask_one(agent)
 
     assert _speech(response) == "Forecast Home is rainy."
+
+
+# --- replies in the request's language ----------------------------------------
+
+
+def _input_in(text: str, language: str) -> conversation.ConversationInput:
+    return conversation.ConversationInput(
+        text=text,
+        context=Context(),
+        conversation_id=None,
+        device_id=None,
+        satellite_id=None,
+        language=language,
+        agent_id="conversation.typesafe_conversation",
+    )
+
+
+async def test_the_agents_own_phrase_is_translated(hass: HomeAssistant):
+    agent = _agent(hass, [])
+    agent.llm.translate = AsyncMock(return_value="Quelle pièce ?")
+    user_input = _input_in("allume la lumière", "fr")
+
+    response = await agent._in_their_language(
+        user_input, agent._speech(user_input, "Which room?")
+    )
+
+    agent.llm.translate.assert_awaited_once_with("Which room?", "fr")
+    assert _speech(response) == "Quelle pièce ?"
+
+
+async def test_english_and_localized_replies_are_left_alone(hass: HomeAssistant):
+    agent = _agent(hass, [])
+    agent.llm.translate = AsyncMock()
+
+    english = _input_in("which room", "en")
+    await agent._in_their_language(english, agent._speech(english, "Which room?"))
+    french = _input_in("quel temps fait-il ?", "fr")
+    await agent._in_their_language(
+        french, agent._speech(french, "Il fait beau.", localized=True)
+    )
+
+    agent.llm.translate.assert_not_awaited()
+
+
+async def test_without_an_llm_the_phrase_stays_english(hass: HomeAssistant):
+    agent = _agent(hass, [])
+    agent.llm = None
+    user_input = _input_in("allume la lumière", "fr")
+
+    response = await agent._in_their_language(
+        user_input, agent._speech(user_input, "Which room?")
+    )
+
+    assert _speech(response) == "Which room?"
+
+
+async def test_a_command_is_confirmed_in_the_request_language(hass: HomeAssistant):
+    from custom_components.typesafe_conversation.actions import spec_for
+
+    hass.states.async_set("light.reading", "on", {"friendly_name": "Reading Light"})
+    agent = _agent(hass, [])
+    agent._fill = AsyncMock(return_value=None)
+    plan = Plan(
+        route=Route.COMMAND,
+        domain="light",
+        action="turn_off",
+        spec=spec_for("light", "turn_off"),
+        target=Target(
+            entity=SimpleNamespace(entity_id="light.reading", name="Reading Light"),
+            domain="light",
+        ),
+    )
+    done = intent.IntentResponse(language="es")
+
+    with patch(f"{AGENT}.async_execute", AsyncMock(return_value=done)):
+        spanish = await agent._run_command(
+            plan, _input_in("apaga la luz de lectura", "es"), MagicMock()
+        )
+    with patch(
+        f"{AGENT}.async_execute",
+        AsyncMock(return_value=intent.IntentResponse(language="en")),
+    ):
+        english = await agent._run_command(
+            plan, _input_in("turn off the reading light", "en"), MagicMock()
+        )
+
+    assert _speech(spanish) == "Se ha apagado la luz"
+    assert _speech(english) == "Turned off Reading Light."

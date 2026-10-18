@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+import weakref
 from dataclasses import dataclass
 from typing import Any
 
@@ -50,6 +51,12 @@ from .script_fields import (
     clock,
     script_service,
 )
+from .speech import (
+    async_error_text,
+    async_localized_action,
+    async_localized_query,
+    is_english,
+)
 from .system_one import (
     SystemOneClient,
     SystemOneError,
@@ -68,6 +75,7 @@ def build_request(
     max_options: int,
     structural: dict[str, Any] | None = None,
     inline_descriptions: bool = False,
+    language: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """The state and questions for one utterance - the first request of a turn.
 
@@ -102,7 +110,7 @@ def build_request(
     state = {
         "request": {
             "text": text,
-            "language": hass.config.language,
+            "language": language or hass.config.language,
             "spoken_from_area": speaker_area_id,
             "local_time": dt_util.now().strftime("%Y-%m-%dT%H:%M"),
             "weekday": dt_util.now().strftime("%A"),
@@ -110,6 +118,10 @@ def build_request(
         "home": catalog.snapshot(catalog.entities),
     }
     return state, questions
+
+
+_ENGLISH_REPLIES: weakref.WeakSet[intent.IntentResponse] = weakref.WeakSet()
+"""Replies the agent worded itself, in English, to translate if need be."""
 
 
 class _AskForRoom(Exception):
@@ -161,6 +173,35 @@ class TypeSafeAgent:
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
     ) -> intent.IntentResponse:
+        response = await self._process(user_input, chat_log)
+        return await self._in_their_language(user_input, response)
+
+    async def _in_their_language(
+        self,
+        user_input: conversation.ConversationInput,
+        response: intent.IntentResponse,
+    ) -> intent.IntentResponse:
+        """Translate a reply the agent worded in English, if the request wasn't.
+
+        Home Assistant's own localized replies, sentence-matcher answers and
+        the LLM's prose are already in the request's language and are left
+        alone. Without an LLM the agent's own phrases stay in English.
+        """
+        if (
+            response not in _ENGLISH_REPLIES
+            or is_english(user_input.language)
+            or self.llm is None
+            or not (text := _spoken(response))
+        ):
+            return response
+        response.async_set_speech(await self.llm.translate(text, user_input.language))
+        return response
+
+    async def _process(
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+    ) -> intent.IntentResponse:
         self.continue_conversation = False
         text = user_input.text.strip()
         if not text:
@@ -176,7 +217,9 @@ class TypeSafeAgent:
 
         speaker_area_id = self._speaker_area(user_input)
         try:
-            response, entities = await self._ask(text, speaker_area_id, chat_log)
+            response, entities = await self._ask(
+                text, speaker_area_id, chat_log, user_input.language
+            )
         except _AskForRoom:
             return self._speech(user_input, "Which room?", continue_conversation=True)
         except SystemOneRequestError as err:
@@ -296,6 +339,7 @@ class TypeSafeAgent:
         text: str,
         speaker_area_id: str | None,
         chat_log: conversation.ChatLog | None,
+        language: str | None = None,
     ) -> tuple[SystemOneResponse, tuple]:
         """Ask everything in one call, plus a second when the home is too big.
 
@@ -313,6 +357,7 @@ class TypeSafeAgent:
             speaker_area_id=speaker_area_id,
             max_options=max_options,
             structural=self._structural_questions(entities),
+            language=language,
         )
         if chat_log is not None and (history := self._history(chat_log)):
             state["conversation"] = history
@@ -490,7 +535,15 @@ class TypeSafeAgent:
             # a command that worked from one that hung. name_target_in_speech
             # only decides how specific to be - in the middle confidence band
             # we name the target so a wrong guess can be corrected at once.
-            response.async_set_speech(describe_action(plan, response))
+            if not is_english(user_input.language) and (
+                said := await async_localized_action(
+                    self.hass, user_input.language, plan, response
+                )
+            ):
+                response.async_set_speech(said)
+            else:
+                response.async_set_speech(describe_action(plan, response))
+                _ENGLISH_REPLIES.add(response)
         return response
 
     async def _handle_compound(
@@ -521,7 +574,10 @@ class TypeSafeAgent:
 
         speaker_area_id = self._speaker_area(user_input)
         results = await asyncio.gather(
-            *(self._ask(part, speaker_area_id, None) for part in parts),
+            *(
+                self._ask(part, speaker_area_id, None, user_input.language)
+                for part in parts
+            ),
             return_exceptions=True,
         )
 
@@ -658,7 +714,7 @@ class TypeSafeAgent:
     ) -> intent.IntentResponse:
         try:
             response, entities = await self._ask(
-                text, self._speaker_area(user_input), chat_log
+                text, self._speaker_area(user_input), chat_log, user_input.language
             )
         except _AskForRoom:
             return self._speech(user_input, "Which room?", continue_conversation=True)
@@ -714,6 +770,15 @@ class TypeSafeAgent:
             except LLMBackendError as err:
                 LOGGER.warning("LLM fallback failed: %s", err)
 
+        if not is_english(user_input.language) and (
+            said := await async_error_text(self.hass, user_input.language, "no_intent")
+        ):
+            return self._error(
+                user_input,
+                intent.IntentResponseErrorCode.NO_INTENT_MATCH,
+                said,
+                localized=True,
+            )
         return self._error(
             user_input,
             intent.IntentResponseErrorCode.NO_INTENT_MATCH,
@@ -746,7 +811,15 @@ class TypeSafeAgent:
             )
             if answer.response_type is not intent.IntentResponseType.ERROR:
                 return answer
+        if not is_english(user_input.language) and (
+            said := await async_localized_query(
+                self.hass, user_input.language, plan, result
+            )
+        ):
+            result.async_set_speech(said)
+            return result
         result.async_set_speech(described)
+        _ENGLISH_REPLIES.add(result)
         return result
 
     async def _answer_freeform(
@@ -789,12 +862,17 @@ class TypeSafeAgent:
             )
         except LLMBackendError as err:
             LOGGER.warning("LLM could not answer: %s", err)
+            # Not sent back to the LLM that just failed, to be translated.
             return self._error(
                 user_input,
                 intent.IntentResponseErrorCode.UNKNOWN,
                 "Sorry, I can't answer that right now.",
+                localized=True,
             )
-        return self._speech(user_input, answer or "I'm not sure.")
+        if not answer:
+            return self._speech(user_input, "I'm not sure.")
+        # The LLM answers in the language it was asked in.
+        return self._speech(user_input, answer, localized=True)
 
     # -- scripts with fields -------------------------------------------------
 
@@ -1042,9 +1120,14 @@ class TypeSafeAgent:
         user_input: conversation.ConversationInput,
         text: str,
         continue_conversation: bool = False,
+        *,
+        localized: bool = False,
     ) -> intent.IntentResponse:
+        """A reply. Unless ``localized``, it is English and may be translated."""
         response = intent.IntentResponse(language=user_input.language)
         response.async_set_speech(text)
+        if not localized:
+            _ENGLISH_REPLIES.add(response)
         if continue_conversation:
             self.continue_conversation = True
         return response
@@ -1054,9 +1137,13 @@ class TypeSafeAgent:
         user_input: conversation.ConversationInput,
         code: intent.IntentResponseErrorCode,
         message: str,
+        *,
+        localized: bool = False,
     ) -> intent.IntentResponse:
         response = intent.IntentResponse(language=user_input.language)
         response.async_set_error(code, message)
+        if not localized:
+            _ENGLISH_REPLIES.add(response)
         return response
 
 

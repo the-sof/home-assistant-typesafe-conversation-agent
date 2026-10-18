@@ -219,3 +219,25 @@ async def test_a_home_without_weather_asks_for_nothing(hass: HomeAssistant):
     )
 
     assert await async_forecast_summary(hass, []) == ""
+
+
+async def test_jev_is_told_the_requests_language(hass: HomeAssistant):
+    from custom_components.typesafe_conversation.agent import build_request
+
+    await _setup(hass)
+    catalog = EntityCatalog(hass, conversation.DOMAIN)
+
+    asked, _ = build_request(
+        hass,
+        catalog,
+        "éteins la lampe",
+        speaker_area_id=None,
+        max_options=26,
+        language="fr",
+    )
+    default, _ = build_request(
+        hass, catalog, "turn off the lamp", speaker_area_id=None, max_options=26
+    )
+
+    assert asked["request"]["language"] == "fr"
+    assert default["request"]["language"] == hass.config.language

@@ -359,6 +359,26 @@ works best if it also accepts the time twelve hours away when nothing matches
 exactly: the language model can't see which alarms exist, so "4:30" said in the
 afternoon reaches the script as 16:30 even when the alarm is at 4:30 AM.
 
+### Languages
+
+A reply is in the language of the request, which in Home Assistant is the
+language of the Assist pipeline it came through. That pipeline's voice reads
+the reply, so the two always match.
+
+- Confirmations, state answers, the time, the weather and "not understood" use
+  Home Assistant's own wording for that language, the same as its built-in
+  assistant.
+- The agent's own phrases, such as "Did you mean…?", "Which room?" or a summary
+  of a compound request, are translated by the language model. Without one
+  they stay in English.
+- Answers from the language model are in the language they were asked in.
+
+For a home with two languages, give each its own pipeline, with its own speech
+recognition and voice, and assign the two to the two wake words of a voice
+satellite. Device names are matched as named in any language, so a sentence
+that mixes languages, such as "apaga la Stand Light", is understood; the reply
+is in the pipeline's language.
+
 ### Leave "prefer handling commands locally" on
 
 The agent advertises `ConversationEntityFeature.CONTROL`. With prefer-local on,

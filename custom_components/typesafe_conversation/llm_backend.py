@@ -42,10 +42,16 @@ from .const import (
     SPLIT_MAX_TOKENS,
     SPLIT_TIMEOUT,
     TOOL_TIMEOUT,
+    TRANSLATE_TIMEOUT,
 )
 
 if TYPE_CHECKING:
     from .tools import AnswerTool
+
+TRANSLATE_SYSTEM_PROMPT = """\
+Translate this reply from a smart-home voice assistant into the language with \
+code "{language}". Keep device, room and area names exactly as written. Reply \
+with the translation only, in plain spoken text."""
 
 SPLIT_SYSTEM_PROMPT = """\
 You split a smart-home voice command into atomic commands.
@@ -257,6 +263,32 @@ class LLMBackend(ABC):
     @abstractmethod
     def _tool_result(call: ToolCall, content: str) -> dict[str, Any]:
         """A tool's result, as the message this server expects."""
+
+    async def translate(self, text: str, language: str) -> str:
+        """The agent's reply in the request's language.
+
+        On any failure the reply is spoken as it is, in English: late or
+        untranslated beats silent.
+        """
+        messages = [
+            {
+                "role": "system",
+                "content": TRANSLATE_SYSTEM_PROMPT.format(language=language),
+            },
+            {"role": "user", "content": text},
+        ]
+        try:
+            raw, metrics = await self._chat(
+                messages,
+                max_tokens=ANSWER_MAX_TOKENS,
+                temperature=0.0,
+                timeout=TRANSLATE_TIMEOUT,
+            )
+        except LLMBackendError as err:
+            LOGGER.warning("Could not translate a reply into %s (%s)", language, err)
+            return text
+        _log_exchange("translate", self.name, self._model, messages, raw, metrics)
+        return spoken(raw) or text
 
     async def split_compound(self, utterance: str) -> list[str]:
         """Break a compound request into atomic commands.

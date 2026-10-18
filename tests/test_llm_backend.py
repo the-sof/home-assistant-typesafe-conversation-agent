@@ -805,3 +805,24 @@ async def test_an_answer_lost_to_the_token_limit_is_logged(
 
     assert answer == ""
     assert "m answer stopped at its token limit before replying" in caplog.text
+
+
+async def test_a_reply_is_translated_keeping_names(session, mocker):
+    backend = OllamaBackend(session, "http://ollama:11434", "qwen")
+    mocker.post(
+        "http://ollama:11434/api/chat", json=_ollama("Voulez-vous dire la Lampe ?")
+    )
+
+    said = await backend.translate("Did you mean the Lampe?", "fr")
+
+    assert said == "Voulez-vous dire la Lampe ?"
+    system = mocker.mock_calls[0][2]["messages"][0]["content"]
+    assert '"fr"' in system
+    assert "names exactly as written" in system
+
+
+async def test_a_failed_translation_keeps_the_english(session, mocker):
+    backend = OllamaBackend(session, "http://ollama:11434", "qwen")
+    mocker.post("http://ollama:11434/api/chat", status=500, text="boom")
+
+    assert await backend.translate("Which room?", "fr") == "Which room?"
