@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-import weakref
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,6 +55,8 @@ from .speech import (
     async_localized_action,
     async_localized_query,
     is_english,
+    mark_english,
+    worded_in_english,
 )
 from .system_one import (
     SystemOneClient,
@@ -118,10 +119,6 @@ def build_request(
         "home": catalog.snapshot(catalog.entities),
     }
     return state, questions
-
-
-_ENGLISH_REPLIES: weakref.WeakSet[intent.IntentResponse] = weakref.WeakSet()
-"""Replies the agent worded itself, in English, to translate if need be."""
 
 
 class _AskForRoom(Exception):
@@ -188,7 +185,7 @@ class TypeSafeAgent:
         alone. Without an LLM the agent's own phrases stay in English.
         """
         if (
-            response not in _ENGLISH_REPLIES
+            not worded_in_english(response)
             or is_english(user_input.language)
             or self.llm is None
             or not (text := _spoken(response))
@@ -543,7 +540,7 @@ class TypeSafeAgent:
                 response.async_set_speech(said)
             else:
                 response.async_set_speech(describe_action(plan, response))
-                _ENGLISH_REPLIES.add(response)
+                mark_english(response)
         return response
 
     async def _handle_compound(
@@ -819,7 +816,7 @@ class TypeSafeAgent:
             result.async_set_speech(said)
             return result
         result.async_set_speech(described)
-        _ENGLISH_REPLIES.add(result)
+        mark_english(result)
         return result
 
     async def _answer_freeform(
@@ -1127,7 +1124,7 @@ class TypeSafeAgent:
         response = intent.IntentResponse(language=user_input.language)
         response.async_set_speech(text)
         if not localized:
-            _ENGLISH_REPLIES.add(response)
+            mark_english(response)
         if continue_conversation:
             self.continue_conversation = True
         return response
@@ -1143,7 +1140,7 @@ class TypeSafeAgent:
         response = intent.IntentResponse(language=user_input.language)
         response.async_set_error(code, message)
         if not localized:
-            _ENGLISH_REPLIES.add(response)
+            mark_english(response)
         return response
 
 

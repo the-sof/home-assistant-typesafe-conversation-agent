@@ -8,6 +8,7 @@ agent, so it renders the same templates itself, the way
 
 from __future__ import annotations
 
+import weakref
 from typing import Any
 
 from homeassistant.core import HomeAssistant, State
@@ -19,6 +20,19 @@ from .const import LOGGER
 from .router import Plan
 
 _CACHE = "typesafe_conversation_intent_texts"
+
+_ENGLISH: weakref.WeakSet[intent.IntentResponse] = weakref.WeakSet()
+
+
+def mark_english(response: intent.IntentResponse) -> intent.IntentResponse:
+    """Record that the agent worded this reply itself, in English."""
+    _ENGLISH.add(response)
+    return response
+
+
+def worded_in_english(response: intent.IntentResponse) -> bool:
+    """Whether to translate this reply when the request was not in English."""
+    return response in _ENGLISH
 
 
 def is_english(language: str | None) -> bool:

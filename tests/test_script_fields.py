@@ -605,8 +605,13 @@ async def test_what_a_script_replies_is_what_is_said(
     hass: HomeAssistant, object_id, title, said
 ):
     """Including a refusal: "slots in use" must never be announced as "Done"."""
+    from custom_components.typesafe_conversation.speech import worded_in_english
+
     await _reply_scripts(hass)
-    assert _speech(await _run(hass, object_id, title)) == said
+    response = await _run(hass, object_id, title)
+    assert _speech(response) == said
+    # Only the agent's own "Done:" is translated; a script's words are its own.
+    assert worded_in_english(response) == said.startswith("Done:")
 
 
 async def test_a_long_routine_is_left_running(hass: HomeAssistant):
