@@ -45,6 +45,7 @@ from .entities import (
 )
 from .router import Plan, Target
 from .script_fields import describe_values
+from .speech import mark_english
 
 
 class ExecutionError(Exception):
@@ -358,19 +359,22 @@ async def _run_script(
         # A routine with delays: let it run on, rather than hold the voice reply.
         call.add_done_callback(_log_late_failure)
         response.async_set_speech(f"Started {title}.")
-        return response
+        return mark_english(response)
     try:
         result = call.result()
     except HomeAssistantError as err:
         # ServiceValidationError included: the script refused these values.
         raise ExecutionError(f"{title} didn't run: {err}") from err
 
-    said = _reply_text(result)
-    if said is None:
-        values = describe_values(plan.script_data or {})
-        said = f"Done: {title} ({values})." if values else f"Done: {title}."
-    response.async_set_speech(said)
-    return response
+    if (said := _reply_text(result)) is not None:
+        # The script's own words, in whatever language it was written in.
+        response.async_set_speech(said)
+        return response
+    values = describe_values(plan.script_data or {})
+    response.async_set_speech(
+        f"Done: {title} ({values})." if values else f"Done: {title}."
+    )
+    return mark_english(response)
 
 
 _REPLY_KEYS = ("speech", "message", "result", "response", "text")
@@ -434,7 +438,7 @@ async def _execute_whole_house(
         )
     verb = "Turned off" if intent_type == INTENT_TURN_OFF else "Turned on"
     response.async_set_speech(f"{verb} everything.")
-    return response
+    return mark_english(response)
 
 
 async def async_execute_query(

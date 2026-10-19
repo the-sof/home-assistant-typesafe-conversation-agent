@@ -159,6 +159,9 @@ async def test_whole_house_always_carries_a_domain(hass: HomeAssistant):
     assert len(light_calls) == 1
     assert len(switch_calls) == 1
     assert response.speech
+    from custom_components.typesafe_conversation.speech import worded_in_english
+
+    assert worded_in_english(response), "translated for a request not in English"
 
 
 async def test_empty_constraints_would_have_raised(hass: HomeAssistant):

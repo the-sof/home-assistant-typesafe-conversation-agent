@@ -122,6 +122,8 @@ DEFAULT_LLM_TITLE: Final = "HA TypeSafe Conversation"
 
 # --- LLM behaviour -----------------------------------------------------------
 SPLIT_TIMEOUT: Final = 4.0
+TRANSLATE_TIMEOUT: Final = 6.0
+"""Seconds to wait for a reply's translation before speaking it in English."""
 LLM_KEEP_ALIVE: Final = "30m"
 LLM_WARMUP_INTERVAL_SECONDS: Final = 20 * 60
 """Only for users who opt in to keeping the Ollama model loaded. By default the
