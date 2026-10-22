@@ -4,7 +4,7 @@
 
 [![tests](https://github.com/the-sof/home-assistant-typesafe-conversation-agent/actions/workflows/test.yml/badge.svg)](https://github.com/the-sof/home-assistant-typesafe-conversation-agent/actions/workflows/test.yml)
 [![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
-[![HACS: custom](https://img.shields.io/badge/HACS-custom-orange.svg)](https://hacs.xyz/docs/faq/custom_repositories/)
+[![HACS: default](https://img.shields.io/badge/HACS-default-41BDF5.svg)](https://hacs.xyz/)
 
 A Home Assistant conversation agent that decides with a
 [TypeSafe System One](https://docs.typesafe.ai) model instead of an LLM.
@@ -208,10 +208,12 @@ tested against 2026.5.0 and the current release on every change.
 
 ### Through HACS
 
-Not in the default HACS store yet, so add it as a custom repository: in HACS,
-**⋮ → Custom repositories**, paste this repository's URL, choose category
-**Integration**, then **Add**. It will then appear in HACS for install and for
-update notifications.
+In HACS, search for **TypeSafe Conversation** and download it, or open it
+directly:
+
+[![Open in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=the-sof&repository=home-assistant-typesafe-conversation-agent&category=integration)
+
+HACS then tells you when a new release is out.
 
 ### By hand
 
