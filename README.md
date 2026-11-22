@@ -60,14 +60,21 @@ HACS then tells you when a new release is out.
 ### If it doesn't show up in HACS
 
 Add it as a custom repository: in HACS, **⋮ → Custom repositories**, paste
-`https://github.com/the-sof/home-assistant-typesafe-conversation-agent`, choose
-category **Integration**, then **Add**. It then appears in HACS for install and
-for update notifications.
+
+```text
+https://github.com/the-sof/home-assistant-typesafe-conversation-agent
+```
+
+choose category **Integration**, then **Add**. It then appears in HACS for
+install and for update notifications.
 
 ### By hand
 
-Copy `custom_components/typesafe_conversation` into your Home Assistant `config`
-directory.
+Copy this folder into your Home Assistant `config` directory:
+
+```text
+custom_components/typesafe_conversation
+```
 
 ## Set up
 
@@ -90,25 +97,34 @@ timeout and language-model settings under **Reconfigure** in the entry's menu,
 and `always_confirm_risky`, `bypass_local_intents` and
 `inline_entity_descriptions` under each conversation agent's **Configure**.
 
-| option | default | what it does |
-| --- | --- | --- |
-| `base_url` | `https://api.typesafe.ai` | The System One server. Any compatible server works; see [Running locally](https://github.com/the-sof/home-assistant-typesafe-conversation-agent#running-locally). |
-| `api_key` | — | Required by TypeSafe's hosted API. Leave blank for a server that doesn't check one, such as Ollama. |
-| `model` | `jev-latest` | Which decision model to use, chosen from what the server offers. On TypeSafe, `jev-latest` tracks the newest Jev. |
-| `api_timeout` | measured | How long to wait for an answer. Set at setup from a timed, real-sized request plus the cold-load time, never below 6 s. |
-| `always_confirm_risky` | **on** | Ask before unlocking a door, opening a garage or disarming an alarm, however sure the model is. **Turning this off lets confident requests through silently** — the model's judgement becomes the only gate. |
-| `bypass_local_intents` | off | Send every command here, including ones Home Assistant's own sentence matcher recognises. Off is recommended; see [below](https://github.com/the-sof/home-assistant-typesafe-conversation-agent#leave-prefer-handling-commands-locally-on). |
-| `inline_entity_descriptions` | off | Describe every entity inside each question rather than once in the shared state. Roughly doubles the tokens. Only worth it if the agent picks the wrong device. |
-| `llm_backend` | none | `ollama`, an OpenAI-compatible endpoint, or none. Used for compound requests, general questions, and [scripts with fields](https://github.com/the-sof/home-assistant-typesafe-conversation-agent#scripts-with-fields). |
-| `llm_base_url` | `http://localhost:11434` for Ollama, `https://openrouter.ai/api` for OpenAI-compatible | Where that backend lives. For Ollama, the machine running it (`localhost` only works if Home Assistant is not in a container). For OpenRouter, a trailing `/v1` is fine. Checked before it is saved. |
-| `llm_model` | — | Model name on that backend, picked from the list the server offers. |
-| `llm_api_key` | — | If the backend needs one. Redacted in diagnostics. |
-| `llm_timeout` | `30` s | How long to wait for the LLM before giving up. Only the prose path is affected. A large local model that must load first may need more. |
-| `llm_keep_loaded` | off | Ollama only. Load the language model at startup and keep it in memory, so the first general question after a pause is fast. Holds the memory while Home Assistant runs; off leaves unloading to the server. |
-| `llm_referer`, `llm_title` | project defaults | Sent as `HTTP-Referer` and `X-Title`; OpenRouter uses them for attribution. |
-| `web_search` | off | Let the LLM look things up when it answers: `off`, `searxng`, or `llm_api`. See [Web search](https://github.com/the-sof/home-assistant-typesafe-conversation-agent#web-search). |
-| `web_search_url` | — | The SearXNG instance. Checked with a real search before it is saved. Redacted in diagnostics. |
-| `web_search_api` | — | The Home Assistant LLM API to take tools from, such as an MCP server. Assist is never offered. |
+**System One server**
+
+- **`base_url`** (default: `https://api.typesafe.ai`): The System One server. Any compatible server works; see [Running locally](https://github.com/the-sof/home-assistant-typesafe-conversation-agent#running-locally).
+- **`api_key`** (no default): Required by TypeSafe's hosted API. Leave blank for a server that doesn't check one, such as Ollama.
+- **`model`** (default: `jev-latest`): Which decision model to use, chosen from what the server offers. On TypeSafe, `jev-latest` tracks the newest Jev.
+- **`api_timeout`** (default: measured): How long to wait for an answer. Set at setup from a timed, real-sized request plus the cold-load time, never below 6 s.
+
+**Behavior**
+
+- **`always_confirm_risky`** (default: **on**): Ask before unlocking a door, opening a garage or disarming an alarm, however sure the model is. **Turning this off lets confident requests through silently** — the model's judgement becomes the only gate.
+- **`bypass_local_intents`** (default: off): Send every command here, including ones Home Assistant's own sentence matcher recognises. Off is recommended; see [below](https://github.com/the-sof/home-assistant-typesafe-conversation-agent#leave-prefer-handling-commands-locally-on).
+- **`inline_entity_descriptions`** (default: off): Describe every entity inside each question rather than once in the shared state. Roughly doubles the tokens. Only worth it if the agent picks the wrong device.
+
+**Language model**
+
+- **`llm_backend`** (default: none): `ollama`, an OpenAI-compatible endpoint, or none. Used for compound requests, general questions, and [scripts with fields](https://github.com/the-sof/home-assistant-typesafe-conversation-agent#scripts-with-fields).
+- **`llm_base_url`** (default: `http://localhost:11434` for Ollama, `https://openrouter.ai/api` for OpenAI-compatible): Where that backend lives. For Ollama, the machine running it (`localhost` only works if Home Assistant is not in a container). For OpenRouter, a trailing `/v1` is fine. Checked before it is saved.
+- **`llm_model`** (no default): Model name on that backend, picked from the list the server offers.
+- **`llm_api_key`** (no default): If the backend needs one. Redacted in diagnostics.
+- **`llm_timeout`** (default: `30` s): How long to wait for the LLM before giving up. Only the prose path is affected. A large local model that must load first may need more.
+- **`llm_keep_loaded`** (default: off): Ollama only. Load the language model at startup and keep it in memory, so the first general question after a pause is fast. Holds the memory while Home Assistant runs; off leaves unloading to the server.
+- **`llm_referer`, `llm_title`** (default: project defaults): Sent as `HTTP-Referer` and `X-Title`; OpenRouter uses them for attribution.
+
+**Web search**
+
+- **`web_search`** (default: off): Let the LLM look things up when it answers: `off`, `searxng`, or `llm_api`. See [Web search](https://github.com/the-sof/home-assistant-typesafe-conversation-agent#web-search).
+- **`web_search_url`** (no default): The SearXNG instance. Checked with a real search before it is saved. Redacted in diagnostics.
+- **`web_search_api`** (no default): The Home Assistant LLM API to take tools from, such as an MCP server. Assist is never offered.
 
 ## Web search
 
@@ -489,9 +505,14 @@ logger:
     custom_components.typesafe_conversation: debug
 ```
 
-or, without a restart, **Developer Tools → Actions → `logger.set_level`** with
-`custom_components.typesafe_conversation: debug`. Each request then logs the
-route, latency and token count, followed by one line per answer:
+or, without a restart, **Developer Tools → Actions → `logger.set_level`** with:
+
+```yaml
+custom_components.typesafe_conversation: debug
+```
+
+Each request then logs the route, latency and token count, followed by one line
+per answer:
 
 ```
 Routed 'get the coffee going' -> command (switch.turn_on) in 244ms, ...
