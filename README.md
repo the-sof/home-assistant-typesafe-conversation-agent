@@ -124,7 +124,7 @@ and `always_confirm_risky`, `bypass_local_intents` and
 
 - **`web_search`** (default: off): Let the LLM look things up when it answers: `off`, `searxng`, or `llm_api`. See [Web search](https://github.com/the-sof/home-assistant-typesafe-conversation-agent#web-search).
 - **`web_search_url`** (no default): The SearXNG instance. Checked with a real search before it is saved. Redacted in diagnostics.
-- **`web_search_api`** (no default): The Home Assistant LLM API to take tools from, such as an MCP server. Assist is never offered.
+- **`web_search_api`** (no default): The Home Assistant LLM API to take tools from, such as an MCP server. Home Assistant's built-in Assist and management APIs are never offered.
 
 ## Web search
 
@@ -152,7 +152,7 @@ come from:
   the default `openmeteo` engine answers with a forecast; keep it enabled.
 
 - **A Home Assistant LLM API** — anything registered with Home Assistant other
-  than Assist. Add a search provider's MCP server with the
+  than its built-in Assist and management APIs. Add a search provider's MCP server with the
   [Model Context Protocol](https://www.home-assistant.io/integrations/mcp/)
   integration and it appears here. Pick one whose tools only look things up:
   every tool it offers is given to the model. Until one is set up, the option
@@ -534,9 +534,9 @@ if you would rather wait.
 ```sh
 python3.14 -m venv .venv   # Home Assistant 2026.5+ needs Python 3.14.2+
 .venv/bin/pip install syrupy ruff \
-    "pytest-homeassistant-custom-component==0.13.367"
+    "pytest-homeassistant-custom-component==0.13.375"
 .venv/bin/pip install "gazetteer-matcher==1.1.0" "hassil==3.12.1" \
-    "home-assistant-intents==2026.8.28"
+    "home-assistant-intents==2026.10.6"
 .venv/bin/python -m pytest
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
 ```
@@ -547,7 +547,7 @@ current one, plus Home Assistant's `hassfest` and the HACS validator. See
 
 The harness version is a **test-environment** choice, not the supported range —
 see *Install* for that. Each release pins exactly one core version
-(`0.13.367` → `homeassistant==2026.9.4`, `0.13.329` → `2026.5.0`), and a mismatch
+(`0.13.375` → `homeassistant==2026.10.4`, `0.13.329` → `2026.5.0`), and a mismatch
 against an already-installed `homeassistant` produces confusing import errors.
 
 The third line is the `conversation` component's own requirements, which the
