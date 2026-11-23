@@ -221,6 +221,19 @@ async def test_assist_is_never_offered(hass: HomeAssistant):
     assert await async_answer_tools(hass, settings, _user_input()) == []
 
 
+async def test_home_assistant_management_is_never_offered(hass: HomeAssistant):
+    """The API added in 2026.11 manages Home Assistant itself."""
+    _register(hass)
+    if "homeassistant" not in {api.id for api in llm.async_get_apis(hass)}:
+        llm.async_register_api(
+            hass, _LookupAPI(hass=hass, id="homeassistant", name="Home Assistant")
+        )
+
+    assert "homeassistant" not in lookup_apis(hass)
+    settings = {"web_search": "llm_api", "web_search_api": "homeassistant"}
+    assert await async_answer_tools(hass, settings, _user_input()) == []
+
+
 async def test_an_llm_api_tool_is_offered_and_called(hass: HomeAssistant):
     _register(hass)
     settings = {"web_search": "llm_api", "web_search_api": "lookup"}
@@ -230,6 +243,22 @@ async def test_an_llm_api_tool_is_offered_and_called(hass: HomeAssistant):
     assert tool.spec()["function"]["name"] == "lookup"
     assert tool.parameters["properties"]["query"]["type"] == "string"
     assert json.loads(await tool.run({"query": "kickoff"})) == {"answer": "KICKOFF"}
+
+
+@pytest.mark.skipif(
+    not hasattr(llm, "ToolResult"),
+    reason="ToolResult arrived in Home Assistant 2026.10",
+)
+async def test_a_tool_result_error_reaches_the_model_as_a_failure(hass: HomeAssistant):
+    _register(hass)
+    settings = {"web_search": "llm_api", "web_search_api": "lookup"}
+    [tool] = await async_answer_tools(hass, settings, _user_input())
+    failed = llm.ToolResult(data={"message": "quota"}, error=True)
+
+    with patch.object(_Lookup, "async_call", AsyncMock(return_value=failed)):
+        text = await tool.run({"query": "x"})
+
+    assert text == 'lookup failed: {"message": "quota"}'
 
 
 async def test_a_bad_argument_reaches_the_model_as_text(hass: HomeAssistant):

@@ -25,9 +25,9 @@ jobs:
           - harness: "0.13.329"   # homeassistant 2026.5.0 - the declared floor
             label: "HA floor"
             version: "2026.5.0"
-          - harness: "0.13.367"   # homeassistant 2026.9.4 - current
+          - harness: "0.13.375"   # homeassistant 2026.10.4 - current
             label: "HA current"
-            version: "2026.9.4"
+            version: "2026.10.4"
 
     name: ${{ matrix.label }}
 

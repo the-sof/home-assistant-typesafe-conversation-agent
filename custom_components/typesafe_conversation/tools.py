@@ -4,14 +4,15 @@ Optional, and off by default. When a user turns web search on, the answer path
 offers the model tools from one source:
 
 * SearXNG, called directly - a self-hosted search with nothing else to set up.
-* Any LLM API registered in Home Assistant except Assist. That is how an MCP
-  server added through the Model Context Protocol integration appears, so any
-  search provider with an MCP server works without code here.
+* Any LLM API registered in Home Assistant except its built-in Assist and
+  Home Assistant management APIs. That is how an MCP server added through the
+  Model Context Protocol integration appears, so any search provider with an
+  MCP server works without code here.
 
-Assist is never offered: device control stays on Jev's typed path, and the
-answer path still cannot turn anything on or off. A tool that fails returns its
-error as text, so the model can answer without it rather than the request
-failing.
+Those two are never offered: device control stays on Jev's typed path, and the
+answer path cannot change the home or Home Assistant through them. A tool that
+fails returns its error as text, so the model can answer without it rather than
+the request failing.
 """
 
 from __future__ import annotations
@@ -257,15 +258,17 @@ def searxng_tool(session: aiohttp.ClientSession, base_url: str) -> AnswerTool:
 # --- Home Assistant LLM APIs ---------------------------------------------------
 
 
-def lookup_apis(hass: HomeAssistant) -> dict[str, str]:
-    """Every registered LLM API that may be offered, by id, with its name.
+# Assist controls devices. "homeassistant" (llm.LLM_API_HOME_ASSISTANT, new in
+# 2026.11) manages registries, automations and config entries.
+_EXCLUDED_APIS = frozenset({llm.LLM_API_ASSIST, "homeassistant"})
 
-    Assist is left out: it controls devices, and this path must not.
-    """
+
+def lookup_apis(hass: HomeAssistant) -> dict[str, str]:
+    """Every registered LLM API that may be offered, by id, with its name."""
     return {
         api.id: api.name
         for api in llm.async_get_apis(hass)
-        if api.id != llm.LLM_API_ASSIST
+        if api.id not in _EXCLUDED_APIS
     }
 
 
@@ -275,7 +278,7 @@ async def async_api_tools(
     user_input: conversation.ConversationInput,
 ) -> list[AnswerTool]:
     """The tools of one Home Assistant LLM API, ready for the model."""
-    if api_id == llm.LLM_API_ASSIST:
+    if api_id in _EXCLUDED_APIS:
         return []
     instance = await llm.async_get_api(
         hass,
@@ -298,7 +301,14 @@ async def async_api_tools(
                 )
             except (HomeAssistantError, vol.Invalid) as err:
                 return f"{tool.name} failed: {err}"
-            return json.dumps(result, ensure_ascii=False, default=str)
+            # Home Assistant 2026.10 wraps a result in a ToolResult; earlier
+            # releases return the JSON object itself.
+            text = json.dumps(
+                getattr(result, "data", result), ensure_ascii=False, default=str
+            )
+            if getattr(result, "error", False):
+                return f"{tool.name} failed: {text}"
+            return text
 
         return AnswerTool(
             name=tool.name,
